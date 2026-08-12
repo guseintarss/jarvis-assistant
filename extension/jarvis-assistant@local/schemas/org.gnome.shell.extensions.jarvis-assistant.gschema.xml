@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.jarvis-assistant"
+          path="/org/gnome/shell/extensions/jarvis-assistant/">
+    <key name="mode" type="s">
+      <default>'voice'</default>
+      <choices>
+        <choice value="voice"/>
+        <choice value="hotkey"/>
+        <choice value="both"/>
+      </choices>
+      <summary>Режим активации</summary>
+      <description>voice — активация по слову «Ева» (постоянное прослушивание микрофона); hotkey — только по горячей клавише; both — и по голосу, и по клавише.</description>
+    </key>
+    <key name="hotkey" type="as">
+      <default>['&lt;Control&gt;&lt;Shift&gt;space']</default>
+      <summary>Горячая клавиша активации</summary>
+      <description>Комбинация, активирующая ассистента в режимах hotkey и both. Настраивается в GNOME «Настройки» → Клавиатура → Настраиваемые сочетания клавиш.</description>
+    </key>
+  </schema>
+</schemalist>

@@ -1,0 +1,9 @@
+{
+    "uuid": "jarvis-assistant@local",
+    "name": "Ева — голосовой ассистент",
+    "description": "Голосовой ассистент Ева. Слушает слово-активатор «Ева», распознаёт речь, отвечает через локальную (Ollama) или облачную LLM женским голосом.",
+    "settings-schema": "org.gnome.shell.extensions.jarvis-assistant",
+    "shell-version": ["45", "46", "47", "48", "49", "50"],
+    "url": "",
+    "version-name": "1.4"
+}
