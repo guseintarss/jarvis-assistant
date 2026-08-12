@@ -8,6 +8,9 @@
  * поэтому расширение — это в первую очередь UI: индикация состояния
  * (ожидание / слушаю / думаю / говорю) и всплывающее меню с последним
  * ответом ассистента, плюс кнопки ручного управления.
+ * 
+ * Примечание: События распознавания речи (Heard) обрабатываются отдельным
+ * расширением Dynamic Island.
  */
 
 import GObject from 'gi://GObject';
@@ -31,26 +34,6 @@ const KEYBINDING_NAME = 'jarvis-activate';
 const MODE_KEY = 'mode';
 const HOTKEY_KEY = 'hotkey';
 
-// Интерфейс, который демон вызывает, чтобы управлять окнами. Сделано на
-// стороне расширения (а не через wmctrl), потому что Wayland-нативные окна
-// невидимы извне — только код внутри GNOME Shell их видит и может
-// закрывать/переносить между рабочими столами.
-const JarvisExtIface = `<node>
-  <interface name="org.jarvis.Assistant.Extension">
-    <method name="SetupWorkEnvironment">
-      <arg type="a(assis)" direction="in" />
-      <arg type="as" direction="in" />
-      <arg type="s" direction="out" />
-    </method>
-    <method name="GetWindowContext">
-      <arg type="s" direction="out" />
-    </method>
-    <method name="CaptureScreen">
-      <arg type="s" direction="out" />
-    </method>
-  </interface>
-</node>`;
-
 const JarvisIface = `
 <node>
   <interface name="org.jarvis.Assistant">
@@ -65,9 +48,6 @@ const JarvisIface = `
     <property name="LastResponse" type="s" access="read" />
     <signal name="StateChanged">
       <arg type="s" name="state" />
-    </signal>
-    <signal name="Heard">
-      <arg type="s" name="text" />
     </signal>
     <signal name="ResponseReady">
       <arg type="s" name="text" />
@@ -85,15 +65,6 @@ const STATE_LABELS = {
     speaking: 'Отвечаю…',
     paused: 'На паузе',
 };
-
-// Подсказки, которые по очереди показываются на острове в ожидании
-const IDLE_HINTS = [
-    'Скажи «Ева»…',
-    'Могу открыть приложения, поставить таймер…',
-    'Спроси погоду, курс валют или новости',
-    '«Ева, начни день» — утренняя сводка',
-    '«Ева, режим исследования» — вкладки и заметки',
-];
 
 // Свои «радио»-пункты меню: в GNOME 48+ PopupRadioMenuItem удалён,
 // поэтому рисуем кружок-галочку обычным пунктом — работает везде 45-50.
@@ -123,384 +94,16 @@ class JarvisRadioItem extends PopupMenu.PopupMenuItem {
     }
 }
 
-// =========================================================================
-// «Динамический остров» — всплывающая пилюля в центре экрана (в стиле
-// iPhone Dynamic Island). Показывает живое состояние ассистента:
-//   слушаю  — зелёные пульсирующие полоски;
-//   думаю   — три задумчиво мигающие точки;
-//   отвечаю — красноватая волна + начало текста ответа.
-// Появляется с анимацией при активации и плавно гаснет в ожидании.
-// =========================================================================
-
-const ISLAND_TICK_WAVE = 90;     // мс между кадрами волны
-const ISLAND_TICK_THINK = 240;   // мс между кадрами точек
-const ISLAND_MAX_LABEL = 60;     // символов ответа на острове
-const ISLAND_HINT_INTERVAL = 7000; // мс смены подсказок в ожидании
-
-class JarvisIsland extends St.BoxLayout {
-    static {
-        GObject.registerClass(this);
-    }
-
-    _init() {
-        super._init({
-            style_class: 'jarvis-island',
-            reactive: true,
-            visible: false,
-            opacity: 0,
-        });
-
-        this._state = 'idle';
-        this._lastResponse = '';
-        this._lastHeard = '';
-        this._tick = 0;
-        this._timers = [];
-        this._callbacks = {};
-        this._dismissed = false;
-        this._hintIdx = 0;
-
-        // Кнопка «позвать Еву» — микрофон. Работает в любом состоянии:
-        // в ожидании — активирует голосовой ввод, во время ответа —
-        // начинает новую команду (текущая доиграет/отменится).
-        this._micBtn = new St.Button({ style_class: 'jarvis-island-mic' });
-        this._micBtn.add_child(new St.Icon({
-            icon_name: 'audio-input-microphone-symbolic',
-            style_class: 'jarvis-island-mic-icon',
-        }));
-        this._micBtn.connect('clicked', () => this._callbacks.activate?.());
-        this.add_child(this._micBtn);
-
-        // 5 «звуковых» полосок — слушаю/отвечаю
-        this._wave = new St.BoxLayout({ style_class: 'jarvis-island-wave' });
-        this._bars = [];
-        for (let i = 0; i < 5; i++) {
-            const bar = new St.Bin({ style_class: 'jarvis-island-bar' });
-            bar.height = 18;
-            this._bars.push(bar);
-            this._wave.add_child(bar);
-        }
-        this._wave.visible = false;
-
-        // 3 точки — думаю
-        this._dots = new St.BoxLayout({ style_class: 'jarvis-island-dots' });
-        this._dotList = [];
-        for (let i = 0; i < 3; i++) {
-            const dot = new St.Bin({ style_class: 'jarvis-island-dot' });
-            this._dotList.push(dot);
-            this._dots.add_child(dot);
-        }
-        this._dots.visible = false;
-
-        // Текстовый блок: маленький заголовок-статус + основная строка
-        this._textBox = new St.BoxLayout({
-            vertical: true,
-            style_class: 'jarvis-island-text',
-        });
-        this._caption = new St.Label({
-            text: '',
-            style_class: 'jarvis-island-caption',
-        });
-        this._label = new St.Label({
-            text: '',
-            style_class: 'jarvis-island-label',
-        });
-        this._textBox.add_child(this._caption);
-        this._textBox.add_child(this._label);
-
-        // Кнопка остановки — прерывает озвучку/обработку (Interrupt)
-        this._stopBtn = new St.Button({ style_class: 'jarvis-island-stop' });
-        this._stopBtn.add_child(new St.Icon({
-            icon_name: 'media-playback-stop-symbolic',
-            style_class: 'jarvis-island-stop-icon',
-        }));
-        this._stopBtn.connect('clicked', () => this._callbacks.interrupt?.());
-        this._stopBtn.visible = false;
-
-        // Кнопка «свернуть» — прячет остров до следующей смены состояния
-        this._closeBtn = new St.Button({ style_class: 'jarvis-island-close' });
-        this._closeBtn.add_child(new St.Icon({
-            icon_name: 'window-close-symbolic',
-            style_class: 'jarvis-island-close-icon',
-        }));
-        this._closeBtn.connect('clicked', () => this._dismiss());
-        this._closeBtn.visible = false;
-
-        this.add_child(this._wave);
-        this.add_child(this._dots);
-        this.add_child(this._textBox);
-        this.add_child(this._stopBtn);
-        this.add_child(this._closeBtn);
-    }
-
-    setCallbacks(callbacks) {
-        this._callbacks = callbacks || {};
-    }
-
-    _center() {
-        const monitor = Main.layoutManager.primaryMonitor;
-        const [, natW] = this.get_preferred_width(-1);
-        this.x = Math.max(0, Math.round((monitor.width - natW) / 2));
-        // Сидим НА верхней кромке экрана, поверх панели (как вырез/нотч
-        // Dynamic Island): пилюля перекрывает центр панели, но из-за
-        // reactive=false клики «проваливаются» сквозь неё к часам.
-        this.y = 6;
-    }
-
-    _appear() {
-        this.remove_all_transitions();
-        this._center();
-        if (!this.get_parent())
-            Main.layoutManager.addTopChrome(this);
-        this.visible = true;
-        // Остров лежит поверх центра панели — прячем часы, пока он открыт
-        this._hidePanelClock();
-        // стартуем «сжатой» — из этого состояния ease её «выпрыгивает»
-        this.scale_x = 0.92;
-        this.scale_y = 0.92;
-        this.ease_property('opacity', 255, {
-            duration: 200,
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-        });
-        this.ease_property('scale_x', 1.0, {
-            duration: 260,
-            mode: Clutter.AnimationMode.EASE_OUT_BACK,
-        });
-        this.ease_property('scale_y', 1.0, {
-            duration: 260,
-            mode: Clutter.AnimationMode.EASE_OUT_BACK,
-        });
-    }
-
-    _disappear() {
-        this.remove_all_transitions();
-        this.ease_property('opacity', 0, {
-            duration: 180,
-            mode: Clutter.AnimationMode.EASE_IN_QUAD,
-            onComplete: () => {
-                this.visible = false;
-                this._restorePanelClock();
-            },
-        });
-    }
-
-    // Пользователь свернул остров сам — ждём следующего состояния
-    _dismiss() {
-        this._stopTimers();
-        this.remove_all_transitions();
-        this.visible = false;
-        this.opacity = 0;
-        this._dismissed = true;
-        this._restorePanelClock();
-    }
-
-    _hidePanelClock() {
-        try {
-            const dm = Main.panel?.statusArea?.dateMenu;
-            if (dm && dm.container)
-                dm.container.visible = false;
-        } catch (e) {
-        }
-    }
-
-    _restorePanelClock() {
-        try {
-            const dm = Main.panel?.statusArea?.dateMenu;
-            if (dm && dm.container)
-                dm.container.visible = true;
-        } catch (e) {
-        }
-    }
-
-    _stopTimers() {
-        for (const id of this._timers) {
-            if (id > 0)
-                GLib.source_remove(id);
-        }
-        this._timers = [];
-    }
-
-    // --- «слушаю»: зелёная пульсирующая волна ---
-    _startWave() {
-        const step = () => {
-            this._tick++;
-            for (let i = 0; i < this._bars.length; i++) {
-                const bar = this._bars[i];
-                // сумма двух синусов с разными частотами — живой шум, не «робот»
-                const t = this._tick / 5 + i * 0.6;
-                let v = 0.35 + 0.65 * (0.7 * Math.abs(Math.sin(t)) +
-                                       0.3 * Math.abs(Math.sin(t * 2.13 + i * 1.7)));
-                v = Math.max(0.12, Math.min(1.0, v));
-                bar.ease_property('scale_y', v, {
-                    duration: ISLAND_TICK_WAVE,
-                    mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                });
-            }
-            return GLib.SOURCE_CONTINUE;
-        };
-        this._timers.push(GLib.timeout_add(GLib.PRIORITY_DEFAULT,
-                                           ISLAND_TICK_WAVE, step));
-    }
-
-    // --- «думаю»: точки мигают по очереди ---
-    _startDots() {
-        const step = () => {
-            this._tick++;
-            for (let i = 0; i < this._dotList.length; i++) {
-                const dot = this._dotList[i];
-                // фаза каждого звена сдвинута на треть периода
-                let s = 0.3 + 0.7 * Math.abs(Math.sin(
-                    (this._tick / 3) + i * (2 * Math.PI / 3)));
-                if (this._state !== 'thinking')
-                    s = 1.0;
-                dot.ease_property('scale_y', s, {
-                    duration: ISLAND_TICK_THINK,
-                    mode: Clutter.AnimationMode.EASE_IN_OUT_QUAD,
-                });
-                dot.ease_property('scale_x', s, {
-                    duration: ISLAND_TICK_THINK,
-                    mode: Clutter.AnimationMode.EASE_IN_OUT_QUAD,
-                });
-            }
-            return GLib.SOURCE_CONTINUE;
-        };
-        this._timers.push(GLib.timeout_add(GLib.PRIORITY_DEFAULT,
-                                           ISLAND_TICK_THINK, step));
-    }
-
-    // --- «думаю»: бегущие точки после услышанной фразы ---
-    _startThinkDots() {
-        let n = 0;
-        const step = () => {
-            n = (n % 3) + 1;
-            if (this._state === 'thinking')
-                this._label.text = `${this._lastHeard}${'.'.repeat(n)}`;
-            return GLib.SOURCE_CONTINUE;
-        };
-        this._timers.push(GLib.timeout_add(GLib.PRIORITY_DEFAULT, 500, step));
-    }
-
-    // --- ожидание: плавно «дышащая» кнопка-микрофон + смена подсказок ---
-    _startIdlePulse() {
-        let up = false;
-        const step = () => {
-            up = !up;
-            const s = up ? 1.08 : 0.94;
-            this._micBtn.ease_property('scale_x', s, {
-                duration: 1200,
-                mode: Clutter.AnimationMode.EASE_IN_OUT_QUAD,
-            });
-            this._micBtn.ease_property('scale_y', s, {
-                duration: 1200,
-                mode: Clutter.AnimationMode.EASE_IN_OUT_QUAD,
-            });
-            return GLib.SOURCE_CONTINUE;
-        };
-        this._timers.push(GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1200, step));
-
-        this._hintIdx = 0;
-        this._label.text = IDLE_HINTS[0];
-        this._timers.push(GLib.timeout_add(GLib.PRIORITY_DEFAULT,
-                                           ISLAND_HINT_INTERVAL, () => {
-            this._hintIdx = (this._hintIdx + 1) % IDLE_HINTS.length;
-            if (this._state === 'idle')
-                this._label.text = IDLE_HINTS[this._hintIdx];
-            return GLib.SOURCE_CONTINUE;
-        }));
-    }
-
-    setHeard(text) {
-        this._lastHeard = text || '';
-        if (this._state === 'thinking') {
-            this._caption.text = 'Вы сказали:';
-            this._label.text = this._lastHeard;
-        }
-    }
-
-    setResponse(text) {
-        this._lastResponse = text || '';
-        if (this._state === 'speaking') {
-            this._caption.text = 'Ева отвечает';
-            this._applySpeakingLabel();
-        }
-    }
-
-    _applySpeakingLabel() {
-        let t = (this._lastResponse || '').replace(/\s+/g, ' ').trim();
-        if (t.length > ISLAND_MAX_LABEL)
-            t = t.slice(0, ISLAND_MAX_LABEL).trimEnd() + '…';
-        this._label.text = t || 'Отвечаю…';
-        this._center();
-    }
-
-    setState(state) {
-        const prev = this._state;
-        this._state = state;
-        this._stopTimers();
-        this.remove_style_class_name(`jarvis-island-${prev}`);
-        this.add_style_class_name(`jarvis-island-${state}`);
-
-        const active = state === 'listening' || state === 'thinking' || state === 'speaking';
-        this._micBtn.visible = true;
-        this._micBtn.scale_x = 1.0;
-        this._micBtn.scale_y = 1.0;
-        this._stopBtn.visible = active;
-        this._closeBtn.visible = active;
-        this._wave.visible = state === 'listening' || state === 'speaking';
-        this._dots.visible = state === 'thinking';
-        this._dismissed = false;
-
-        if (state === 'idle') {
-            // Компактная капсула-приглашение: подсказки + пульсирующий
-            // микрофон. Появляется плавно при готовности демона.
-            this._caption.text = 'Ева на месте';
-            this._appear();
-            this._startIdlePulse();
-            this._center();
-        } else if (state === 'listening') {
-            this._caption.text = 'Слушаю';
-            this._label.text = 'Скажите команду…';
-            this._appear();
-            this._startWave();
-            this._center();
-        } else if (state === 'thinking') {
-            this._caption.text = this._lastHeard ? 'Вы сказали:' : 'Обрабатываю';
-            this._label.text = this._lastHeard || 'Думаю…';
-            this._appear();
-            this._startDots();
-            this._startThinkDots();
-            this._center();
-        } else if (state === 'speaking') {
-            this._caption.text = 'Ева отвечает';
-            this._applySpeakingLabel();
-            this._appear();
-            this._startWave();
-            this._center();
-        } else {
-            // paused / offline — плавно гаснем
-            this._disappear();
-        }
-    }
-
-    destroy() {
-        this._stopTimers();
-        this.remove_all_transitions();
-        this._restorePanelClock();
-        if (this.get_parent())
-            this.get_parent().remove_child(this);
-        super.destroy();
-    }
-}
 
 class JarvisAssistantIndicator extends PanelMenu.Button {
     static {
         GObject.registerClass(this);
     }
 
-    _init(settings, island) {
+    _init(settings) {
         super._init(0.0, 'Jarvis Assistant (Ева)', false);
 
         this._settings = settings;
-        this._island = island;
         this._mode = 'voice';
         this._state = 'offline';
         this._proxy = null;
@@ -639,30 +242,18 @@ class JarvisAssistantIndicator extends PanelMenu.Button {
 
             const id1 = this._proxy.connectSignal('StateChanged', (proxy, sender, [state]) => {
                 this._applyStateStyle(state);
-                if (this._island)
-                    this._island.setState(state);
             });
-            const id2 = this._proxy.connectSignal('Heard', (proxy, sender, [text]) => {
-                if (this._island)
-                    this._island.setHeard(text);
-            });
-            const id3 = this._proxy.connectSignal('ResponseReady', (proxy, sender, [text]) => {
+            const id2 = this._proxy.connectSignal('ResponseReady', (proxy, sender, [text]) => {
                 this._responseItem.label.text = text;
-                if (this._island)
-                    this._island.setResponse(text);
             });
-            this._signalIds = [id1, id2, id3];
+            this._signalIds = [id1, id2];
 
             // Подтягиваем текущее состояние сразу после подключения
             const currentState = this._proxy.State || 'idle';
             this._applyStateStyle(currentState);
-            if (this._island)
-                this._island.setState(currentState);
             const lastResponse = this._proxy.LastResponse;
             if (lastResponse) {
                 this._responseItem.label.text = lastResponse;
-                if (this._island)
-                    this._island.setResponse(lastResponse);
             }
             // Сообщаем демону выбранный режим активации
             this._callMethod('SetActivationMode', this._mode);
@@ -709,10 +300,6 @@ class JarvisAssistantIndicator extends PanelMenu.Button {
         }
         if (this._settingsChangedId)
             this._settings.disconnect(this._settingsChangedId);
-        if (this._island) {
-            this._island.destroy();
-            this._island = null;
-        }
         Main.wm.removeKeybinding(KEYBINDING_NAME);
         super.destroy();
     }
@@ -976,12 +563,7 @@ export default class JarvisAssistantExtension extends Extension {
     enable() {
         try {
             this._settings = this.getSettings('org.gnome.shell.extensions.jarvis-assistant');
-            this._island = new JarvisIsland();
-            this._indicator = new JarvisAssistantIndicator(this._settings, this._island);
-            this._island.setCallbacks({
-                activate: () => this._indicator._callMethod('Activate'),
-                interrupt: () => this._indicator._callMethod('Interrupt'),
-            });
+            this._indicator = new JarvisAssistantIndicator(this._settings);
             Main.panel.addToStatusArea(this.uuid, this._indicator);
             this._windowManager = new JarvisWindowManager(this);
             this._windowManager.start();
@@ -992,12 +574,7 @@ export default class JarvisAssistantExtension extends Extension {
                 this._indicator?.destroy();
             } catch (_e) {
             }
-            try {
-                this._island?.destroy();
-            } catch (_e) {
-            }
             this._indicator = null;
-            this._island = null;
         }
     }
 
