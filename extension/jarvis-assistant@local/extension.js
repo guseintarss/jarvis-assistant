@@ -34,6 +34,26 @@ const KEYBINDING_NAME = 'jarvis-activate';
 const MODE_KEY = 'mode';
 const HOTKEY_KEY = 'hotkey';
 
+// Интерфейс, который демон вызывает, чтобы управлять окнами. Сделано на
+// стороне расширения (а не через wmctrl), потому что Wayland-нативные окна
+// невидимы извне — только код внутри GNOME Shell их видит и может
+// закрывать/переносить между рабочими столами.
+const JarvisExtIface = `<node>
+  <interface name="org.jarvis.Assistant.Extension">
+    <method name="SetupWorkEnvironment">
+      <arg type="a(assis)" direction="in" />
+      <arg type="as" direction="in" />
+      <arg type="s" direction="out" />
+    </method>
+    <method name="GetWindowContext">
+      <arg type="s" direction="out" />
+    </method>
+    <method name="CaptureScreen">
+      <arg type="s" direction="out" />
+    </method>
+  </interface>
+</node>`;
+
 const JarvisIface = `
 <node>
   <interface name="org.jarvis.Assistant">
@@ -61,6 +81,7 @@ const STATE_LABELS = {
     offline: 'Демон не запущен',
     idle: 'Ожидаю слово «Ева»',
     listening: 'Слушаю…',
+    dialog: 'Диалог: слушаю…',
     thinking: 'Обрабатываю запрос…',
     speaking: 'Отвечаю…',
     paused: 'На паузе',

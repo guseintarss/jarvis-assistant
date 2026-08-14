@@ -17,11 +17,13 @@
 """
 
 import collections
+import asyncio
 import base64
 import datetime
 import difflib
 import io
 import json
+import logging
 import os
 import queue
 import random
@@ -34,6 +36,7 @@ import time
 import urllib.parse
 import wave
 import socket
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import re
@@ -47,377 +50,34 @@ gi.require_version('Gio', '2.0')
 from gi.repository import GLib, Gio
 
 # ============================== CONFIG ===================================
+# Все настройки вынесены в config.py (тот же каталог) — редактируйте их там.
+# Приватные значения (API-ключи, секреты) можно задавать переменными
+# окружения или файлом ~/.config/jarvis-assistant/config — см. config.py.
 
-HOME = os.path.expanduser('~')
-
-# Путь к маленькой Vosk-модели для распознавания слова-активатора.
-# Скачивается install.sh в ~/.local/share/jarvis-assistant/models/vosk-model-small-ru
-VOSK_MODEL_PATH = os.path.join(HOME, '.local/share/jarvis-assistant/models/vosk-model-small-ru')
-
-# Слово-активатор — «Ева» (и близкий вариант «Эва»). Маленькая Vosk-модель
-# часто распознаёт его неточно: «ево», «еву», «эво», «йева»... Поэтому поиск
-# не буквальный, а фонетический (см. contains_wake_word): в начале слова
-# допускается призвук «й/ъ/ь», гласные «е/э» взаимозаменяемы, а последняя
-# гласная может быть любой из «а/о/у/ы».
-WAKE_WORDS = ['ева', 'эва']
-
-# faster-whisper для точного распознавания самой команды.
-# base — в 3 раза быстрее small на коротких командах (0.4 с vs 1.3 с),
-# на простых фразах текст совпадает (проверено на реальной записи);
-# small точнее на длинных/шумных командах.
-#
-# На слабых ноутбуках без дискретной GPU (Intel HD/UHD Graphics и т.п.)
-# распознавание и LLM считаются целиком на CPU, поэтому важно не забирать
-# все ядра — иначе будет лагать GNOME Shell/браузер. Оставляем одно ядро
-# системе и не берём больше 4 (после этого прирост скорости faster-whisper
-# почти не растёт, а конкуренция за CPU только вредит остальному вслух).
-_CPU_COUNT = os.cpu_count() or 4
-WHISPER_MODEL_SIZE = 'small'     # tiny/base/small/medium — чем больше, тем точнее и медленнее.
-                                  # Вместо base поставлен small: заметно точнее на русской
-                                  # речи (шумные/длинные команды), работает ~1.3 с на фразу.
-                                  # На очень слабом CPU можно вернуть 'base' (0.4 с).
-WHISPER_DEVICE = 'cpu'
-WHISPER_COMPUTE_TYPE = 'int8'    # хорошо для CPU ноутбука
-WHISPER_CPU_THREADS = max(2, min(4, _CPU_COUNT - 1))  # авто, под число ядер машины
-WHISPER_BEAM_SIZE = 5            # больше beam = точнее, но медленнее
-WHISPER_LAZY_LOAD = True         # грузить faster-whisper только при первом запросе
-                                  # (всегда прогревается в фоне при старте демона — см.
-                                  # worker_loop: первая команда распознаётся без паузы)
-
-# Подсказка для распознавания: часто встречающиеся слова пишутся верно,
-# а не как услышаны («киркулятор» → «калькулятор»).
-WHISPER_INITIAL_PROMPT = (
-    'Ева, открой браузер, терминал, калькулятор, файлы, настройки, '
-    'почту, погоду, время, музыку, видео. Сделай громче, тише, выключи звук.'
-)
-
-# Пауза после логина перед загрузкой моделей (сек). На слабом железе даёт
-# GNOME Shell спокойно доехать до рабочего стола, не конкурируя за CPU/RAM.
-STARTUP_DELAY_SECONDS = 10
-
-# Погода (open-meteo, бесплатно без ключа). Впишите координаты своего
-# города (можно найти по адресу https://open-meteo.com)
-WEATHER_LAT = 55.7558
-WEATHER_LON = 37.6173
-
-# ============================== ПРОТОКОЛ «УТРО / СТАРТ ДНЯ» ================
-#
-# «Ева, доброе утро» / «начни день» (см. action_morning_routine):
-#   1) открывает почту, календарь и таск-менеджер;
-#   2) зачитывает сводку: погода, курсы валют, новости;
-#   3) включает фоновую музыку/подкаст на негромкой громкости.
-
-# Утренние приложения: 'app' — название установленного приложения
-# (впишите свой клиент: geary, thunderbird, evolution...), 'url' —
-# веб-версия, которая открывается, если такого приложения нет.
-MORNING_APPS = [
-    {'app': 'почта', 'url': 'https://mail.google.com'},
-    {'app': 'календарь', 'url': 'https://calendar.google.com'},
-    {'app': 'todoist', 'url': 'https://todoist.com/app'},
-    # {'app': 'notion', 'url': 'https://www.notion.so'},  # второй таск-менеджер
-]
-
-# Фоновая музыка/подкаст: сначала пробуем приложение, если его нет —
-# открываем веб-плеер по ссылке. Пустые строки выключают этот шаг.
-MORNING_MUSIC_APP = 'spotify'
-MORNING_MUSIC_URL = 'https://music.youtube.com'
-MORNING_MUSIC_VOLUME = 40  # громкость фоновой музыки (0-100)
-
-# Сколько новостных заголовков зачитывать в утренней сводке
-NEWS_HEADLINES = 3
-
-# RSS-ленты новостей для утренней сводки: пробуются по очереди, пока
-# одна не ответит (бесплатно, без ключа). Можно подставить свою ленту.
-NEWS_RSS_URLS = [
-    'https://lenta.ru/rss/news',
-    'https://ria.ru/export/rss2/archive/index.xml',
-    'https://www.interfax.ru/rss.asp',
-    'https://tass.ru/rss/v2.xml',
-]
-
-# Курсы валют к рублю в утренней сводке: (код в API, русское название)
-RATES_CURRENCIES = [('USD', 'доллар'), ('EUR', 'евро'), ('CNY', 'юань')]
-
-# ============================== ПРОТОКОЛ «ИССЛЕДОВАНИЕ / ОБУЧЕНИЕ» ===========
-#
-# «Ева, режим исследования» / «давай учиться» (см. action_learning_routine):
-#   1) открывает браузер с вкладками: документация, Stack Overflow, YouTube;
-#   2) открывает заметки (Obsidian или блокнот);
-#   3) запускает терминал для экспериментов.
-
-# Вкладки браузера для режима исследования (открываются в текущем браузере)
-LEARNING_TABS = [
-    'https://developer.mozilla.org/ru/',
-    'https://stackoverflow.com/',
-    'https://www.youtube.com/',
-]
-
-# Приложение для заметок: перебираются по очереди — первое установленное
-# открывается; если ни одного нет, открывается первая непустая 'url'.
-LEARNING_NOTES_APPS = [
-    {'app': 'obsidian', 'url': ''},
-    {'app': 'текстовый редактор', 'url': 'https://app.notion.so/'},
-]
-
-# ============================== ПРОТОКОЛ «КОММУНИКАЦИЯ» ======================
-#
-# «Ева, проверь сообщения» (см. action_communication_routine):
-#   1) поднимает локальный MTProto-прокси tg-ws-proxy (скриптом, без
-#      systemd и диалога пароля) и подключает его к Telegram через
-#      tg://proxy — прямо в работающее приложение, без перезапуска;
-#   2) открывает мессенджеры: Telegram, Slack, Discord;
-#   3) проверяет непрочитанные/приоритетные сообщения скриптом-хуком.
-
-# Локальный MTProto-прокси для Telegram: порт и секрет (32 hex-символа).
-# Если порт уже занят этим же прокси (запущен вручную или через systemd) —
-# Ева просто использует его, не поднимая второй.
-TG_WSPROXY_PORT = 1443
-TG_WSPROXY_SECRET = '3075abe65830f0325116bb0416cadf9f'
-
-# Мессенджеры: 'app' — установленное приложение, 'url' — веб-версия,
-# которая открывается, если приложения нет. Для Telegram веб-версия
-# требует QR-входа, поэтому url оставлен пустым — только приложение.
-COMMUNICATION_APPS = [
-    {'app': 'telegram', 'url': ''},
-    {'app': 'slack', 'url': 'https://app.slack.com/'},
-    {'app': 'discord', 'url': 'https://discord.com/app'},
-]
-
-# Скрипт проверки непрочитанных/приоритетных сообщений (любой ваш
-# скрипт, например на telethon): Ева выполняет его (до 15 с) и озвучивает
-# вывод. Пустая строка — шаг пропускается (тогда про непрочитанные Ева
-# честно говорит, что доступа нет).
-UNREAD_CHECK_CMD = ''
-
-# Таймер: допустимый диапазон в секундах
-TIMER_MIN_SECONDS = 5
-TIMER_MAX_SECONDS = 6 * 3600  # 6 часов
-
-# ============================== LLM ======================================
-#
-# РАЗДЕЛЕНИЕ РОЛЕЙ (без «гонки бэкендов»), см. ask_llm:
-#   • ЛОКАЛЬНАЯ модель (Ollama) — «рабочая»: на каждый запрос она первой
-#     выполняет действия (открыть приложение, время, таймер, громкость...)
-#     и отдаёт результат облаку как контекст. Вслух она НЕ отвечает.
-#   • ОБЛАЧНАЯ модель (OpenAI-совместимый API) — «оратор»: формулирует
-#     итоговый ответ, который читается вслух. Инструменты ей не передаются —
-#     действия уже сделаны локально.
-#   • Запасной путь: если облако перегружено/недоступно (429, остывание,
-#     отсутствие сети) — озвучивается текст локальной модели.
-# По умолчанию облако — БЕСПЛАТНЫЙ DeepSeek V4 Flash Free (бесплатный шлюз
-# opencode.ai/zen/v1 — API-ключ НЕ нужен, данные не отправляются сторонним
-# провайдерам).
-LLM_BACKEND = 'openai'          # оставлено для совместимости (роли больше не зависят от этого)
-
-# Общая HTTP-сессия с keep-alive: LLM-запросы переиспользуют одно
-# TCP+TLS соединение вместо нового на каждый вопрос (быстрее ответ,
-# меньше сокетов и нагрузки на сеть).
-_http = requests.Session()
-
-# Облачный провайдер:
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
-#    БЕСПЛАТНЫЙ DeepSeek V4 Flash Free (opencode.ai/zen — без ключа):
-#        OPENAI_BASE_URL = 'https://opencode.ai/zen/v1'
-#        OPENAI_MODEL = 'deepseek-v4-flash-free'
-#    Платные варианты (впишите ключ в OPENAI_API_KEY):
-#        OpenAI:            https://api.openai.com/v1        (модель gpt-4o-mini)
-#        OpenRouter:        https://openrouter.ai/api/v1     (модель openai/gpt-4o-mini,
-#                                                            или бесплатные deepseek-chat и т.п.)
-#        Groq:              https://api.groq.com/openai/v1   (модель llama-3.1-8b-instant)
-OPENAI_BASE_URL = 'https://opencode.ai/zen/v1'
-OPENAI_MODEL = 'deepseek-v4-flash-free'
-
-# Ollama — локальная модель в роли «рабочей» (выполняет действия, вслух
-# не отвечает, итоговый ответ формулирует облако). На машине без дискретной
-# GPU (только Intel HD/UHD Graphics) инференс идёт целиком на CPU: 7b-модель
-# генерирует несколько токенов в секунду и дольше думает над вызовом
-# инструментов, занимая ядра и ~4-5 ГБ ОЗУ. Для таких ноутбуков лучше
-# 1.5b-3b — она быстрее «работает». Если качество инструментов важнее
-# скорости — верните 7b, но учитывайте это.
-OLLAMA_URL = 'http://localhost:11434/api/generate'       # запасной вариант без tools
-OLLAMA_CHAT_URL = 'http://localhost:11434/api/chat'       # основной — с function calling
-OLLAMA_MODEL = 'qwen2.5:3b-instruct'   # см. README про выбор модели (важно: модель должна поддерживать tools)
-
-# Облачная vision-модель для описания экрана (Ева, что на экране?).
-# Модель должна принимать картинки; у бесплатного opencode.ai/zen текстовые
-# модели, поэтому ради «зрения» укажите ключ и vision-модель, например:
-#   OpenAI:   OPENAI_API_KEY=...  VISION_OPENAI_MODEL='gpt-4o-mini'
-#   OpenRouter: OPENAI_BASE_URL='https://openrouter.ai/api/v1'
-#              VISION_OPENAI_MODEL='openai/gpt-4o-mini'
-VISION_OPENAI_MODEL = 'gpt-4o-mini'
-
-# Устойчивость к перегрузке облака. Бесплатные эндпоинты (opencode.ai/zen)
-# отвечают 429 Too Many Requests по несколько секунд в минуту. Чтобы не
-# заставлять пользователя ждать, пока облако «отдышится», сбои считаются
-# агрессивно: после CLOUD_MAX_FAULTS подряд облако уходит в остывание,
-# и Ева отвечает текстом локальной модели (действия она всё равно
-# выполнила). Пока облако перегружено — ждать приходится максимум
-# 2 попытки × 2 с вместо долгих серий ретраев.
-CLOUD_RETRY_DELAY_SEC = 2    # пауза перед повторной попыткой при 429
-CLOUD_MAX_FAULTS = 2         # сколько сбоев подряд до «остывания» облака
-CLOUD_COOLDOWN_SEC = 45      # на сколько секунд отключать облако после сбоев
-
-# Полная разгрузка облака: JARVIS_CLOUD_ENABLED=0 (или False) — облачная
-# модель не вызывается вообще, отвечает только локальная Ollama (быстро,
-# офлайн; качество ответов — как у локальной модели). Без интернета/ключей
-# или при перегруженном бесплатном эндпоинте это снимает половину нагрузки.
-CLOUD_ENABLED = os.environ.get('JARVIS_CLOUD_ENABLED', '1') != '0'
-
-# Разрешить ли ассистенту реально выполнять системные действия (громкость,
-# яркость, запуск приложений и т.д.), а не просто говорить о них.
-ALLOW_SYSTEM_ACTIONS = True
-
-# Максимум "кругов" вызова инструментов за один запрос пользователя
-# (защита от зацикливания модели)
-MAX_TOOL_ROUNDS = 4
-
-SYSTEM_PROMPT = (
-    "Ты — Ева, голосовой ассистент встроенный в ноутбук пользователя "
-    "на Linux/GNOME. "
-    "Отвечай как живой человек в обычном устном разговоре: просто, коротко "
-    "и своими словами, без канцелярита и шаблонных фраз. "
-    "На простые вопросы отвечай ОДНИМ коротким предложением (5-10 слов); "
-    "больше 2-3 предложений — только если пользователь явно попросил "
-    "подробностей или это действительно нужно по делу. "
-    "НИКОГДА не повторяй одну и ту же мысль, не перефразируй уже сказанное "
-    "и не добавляй «заключение» поверх ответа — скажи один раз и всё. "
-    "Не используй списки, нумерацию, заголовки, markdown, эмодзи и скобки "
-    "с пояснениями — только обычный текст живой речи. "
-    "Обращайся к пользователю просто, без титулов и обращений «сэр», "
-    "«господин» и подобных. "
-    "У тебя ЕСТЬ доступ к реальному управлению системой через набор функций "
-    "(инструментов): открыть приложение, изменить громкость и яркость, "
-    "включить/выключить Wi-Fi, заблокировать экран, перевести ноутбук в "
-    "спящий режим, включить/выключить тёмную тему и ночной режим экрана, "
-    "открыть ссылку в браузере, узнать текущее время, поставить таймер, "
-    "найти файл по имени, узнать погоду, сделать скриншот. Когда пользователь просит "
-    "сделать что-то из этого — вызывай соответствующую функцию, не проси "
-    "разрешения и не описывай процесс словами, просто сделай и коротко "
-    "подтверди результат после того, как получишь результат вызова функции. "
-    "Если функции для запрошенного действия нет — честно скажи, что пока не "
-    "умеешь этого делать. "
-    "ВАЖНО: никогда не произноси слово «Ева» и не обращайся к себе по имени "
-    "в ответах — это слово-активатор, оно будит ассистента заново."
-)
-
-# ============================== TTS ======================================
-#
-# Голос по умолчанию — женский, максимально естественный.
-# 1) edge-tts (предпочтительно, НЕЙРОННЫЙ голос Microsoft «Светлана» —
-#    звучит почти как живой человек; бесплатно, без API-ключа, нужен
-#    интернет; установка: pip install edge-tts):
-# 2) RHVoice (офлайн-запасной вариант):
-#    - системный пакет: sudo pacman -S rhvoice rhvoice-language-russian
-#      rhvoice-voice-elena (Arch) — или apt install rhvoice rhvoice-voices
-#      (Debian/Ubuntu);
-#    - либо без sudo: install.sh скачивает голос elena в каталог
-#      ~/.local/share/jarvis-assistant/models/rhvoice/.
-# 3) Piper — женский голос irina (ru_RU-irina-medium), последний запасной.
-EDGE_TTS_VOICE = 'ru-RU-SvetlanaNeural'  # женский нейроголос Microsoft
-EDGE_TTS_RATE = '+15%'  # темп речи: '+10%' быстрее, '-10%' медленнее
-PIPER_VOICE_MODEL = os.path.join(
-    HOME, '.local/share/jarvis-assistant/models/piper/ru_RU-irina-medium.onnx'
-)
-RHVOICE_VOICE = 'Elena'  # женский голос RHVoice (доступен: Elena, Irina, Anna...)
-RHVOICE_DATA_PATH = os.path.join(
-    HOME, '.local/share/jarvis-assistant/models/rhvoice')  # каталог без sudo
-# Темп речи RHVoice: 1.0 = голос как есть, 1.2-1.35 = заметно быстрее, но
-# всё ещё естественно на слух (фраза звучит и синтезируется короче).
-RHVOICE_RATE = 1.25
-
-# Скорость Piper через длину фонем: меньше 1.0 = речь быстрее (1.0 = как есть).
-PIPER_LENGTH_SCALE = 0.9
-
-# Аудио
-SAMPLE_RATE = 16000
-BLOCK_SIZE = 8000            # 0.5 сек при 16kHz
-SILENCE_RMS_THRESHOLD = 300  # НЕ используется напрямую: порог тишины адаптивный,
-                             # считается от уровня шума микрофона (см. is_silence)
-SILENCE_HANG_SECONDS = 1.5   # тишина такой длины завершает запись команды
-MAX_COMMAND_SECONDS = 12
-MIC_DEVICE = None            # None = устройство по умолчанию; либо индекс из `python3 -m sounddevice`
-
-# Сколько секунд аудио держать «в хвосте» перед словом-активатором. Нужно,
-# чтобы команда, сказанная одним дыханием с «Ева» («Ева, открой
-# браузер»), не терялась при очистке очереди.
-AUDIO_TAIL_SECONDS = 2.0
-
-# Сколько раз переспросить, если команда не распозналась
-RECORD_RETRIES = 2
-
-# Максимум ожидания ответа LLM (сек). Облако иногда отвечает медленно,
-# но бесконечно ждать нельзя — надёжнее вернуться в ожидание.
-MAX_LLM_WAIT_SECONDS = 90
-
-# faster-whisper — самая тяжёлая модель (~500 МБ ОЗУ). Если команды давно
-# не было — выгружаем её из памяти; при следующей команде она загрузится
-# заново (~1-4 с, это время пользователь видит как «думает»).
-WHISPER_UNLOAD_IDLE_SECONDS = 600
-
-# Сколько последних пар (вопрос, ответ) помнить для контекста диалога
-HISTORY_LIMIT = 6
-
-# Длинный ответ (например, с кодом или развёрнутым текстом) озвучивать
-# полностью — долго и бесполезно на слух. Обрезаем озвучку до этой длины;
-# полный текст всё равно виден в меню расширения GNOME Shell (LastResponse).
-MAX_SPOKEN_CHARS = 600
-
-# ============================== АКТИВАЦИЯ =================================
-#
-# Как демон «просыпается» и начинает слушать команду:
-#   'voice'  — по слову-активатору «Ева» (постоянное прослушивание микрофона);
-#   'hotkey' — только по горячей клавише (расширение/меню «Активировать
-#              вручную»); микрофон не слушается постоянно;
-#   'both'   — и по голосу, и по горячей клавише.
-# Значение по умолчанию на старте. Расширение GNOME Shell может менять его
-# на лету (меню расширения → настройки), посылая D-Bus метод
-# SetActivationMode — тогда правки в этом конфиге не нужны.
-ACTIVATION_MODE = 'voice'
-
-# Комбинация для активации по горячей клавише (использует расширение Shell).
-HOTKEY_DEFAULT = '<Control><Shift>space'
-
-# ============================== D-BUS SERVICE =============================
-#
-# Реализовано на чистом Gio (без pydbus): pydbus не работает с Python 3.13+
-# (у объектов-сигналов удалили атрибут .name, и pydbus падает при публикации),
-# а Gio — это тот же механизм, которым пользуется само расширение.
-
-DBUS_BUS_NAME = 'org.jarvis.Assistant'
-DBUS_OBJECT_PATH = '/org/jarvis/Assistant'
-DBUS_INTERFACE_NAME = 'org.jarvis.Assistant'
-
-DBUS_INTROSPECTION = """
-<node>
-  <interface name='org.jarvis.Assistant'>
-    <method name='Activate' />
-    <method name='Interrupt' />
-    <method name='Stop' />
-    <method name='TogglePause' />
-    <method name='SetActivationMode'>
-      <arg type='s' direction='in' />
-    </method>
-    <property name='State' type='s' access='read' />
-    <property name='LastResponse' type='s' access='read' />
-    <signal name='StateChanged'>
-      <arg type='s' />
-    </signal>
-    <signal name='Heard'>
-      <arg type='s' />
-    </signal>
-    <signal name='ResponseReady'>
-      <arg type='s' />
-    </signal>
-  </interface>
-</node>
-"""
+from config import *  # noqa: F401,F403 — константы CONFIG-секции
+from config import _http  # noqa: F401 — общая HTTP-сессия с keep-alive
 
 _dbus_connection = None
 _main_loop = None
 
 
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)-5s %(message)s',
+    stream=sys.stderr,
+)
+
+
 def _log(msg):
-    print(msg, file=sys.stderr, flush=True)
+    logging.info(msg)
+
+
+def _warn(msg):
+    logging.warning(msg)
+
+
+def _err(msg):
+    logging.error(msg)
 
 
 def init_dbus():
@@ -580,10 +240,30 @@ audio_tail = collections.deque(
 )
 
 
+_mic_gain_smoothed = 1.0
+
+
+def _boost_chunk(pcm):
+    """Нормализует громкость блока: шёпот (тихие блоки) усиливает до уровня
+    обычной речи, громкие не трогает. Усиление меняется плавно между блоками,
+    чтобы не было щелчков и «насоса» на границе тихо/громко."""
+    global _mic_gain_smoothed
+    samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
+    rms_val = float(np.sqrt(np.mean(samples ** 2)))
+    if rms_val > 0:
+        target = min(MIC_GAIN_MAX, MIC_GAIN_TARGET_RMS / rms_val)
+    else:
+        target = MIC_GAIN_MAX
+    _mic_gain_smoothed += (target - _mic_gain_smoothed) * 0.4
+    samples *= _mic_gain_smoothed
+    np.clip(samples, -32768, 32767, out=samples)
+    return samples.astype(np.int16).tobytes()
+
+
 def audio_callback(indata, frames, time_info, status):
     if status:
-        print(f'[audio] {status}', file=sys.stderr)
-    chunk = bytes(indata)
+        _err(f'[audio] {status}')
+    chunk = _boost_chunk(bytes(indata))
     audio_tail.append(chunk)
     audio_queue.put(chunk)
 
@@ -750,8 +430,7 @@ def _close_other_windows(keep_classes):
     """Закрывает все окна рабочего стола (wmctrl), кроме окон приложений
     из keep_classes (сравнение по WM_CLASS из wmctrl -lx)."""
     if not shutil.which('wmctrl'):
-        print('[jarvis] wmctrl не установлен — не могу закрывать окна',
-              file=sys.stderr)
+        _warn('[jarvis] wmctrl не установлен — не могу закрывать окна')
         return 0
     r = _run(['wmctrl', '-lx'])
     if r.returncode != 0 or not r.stdout.strip():
@@ -826,7 +505,7 @@ def _extension_call(method, params, reply_type, timeout_ms=10000):
         )
         return result.unpack()
     except GLib.Error as e:
-        print(f'[jarvis] расширение не ответило ({method}): {e}', file=sys.stderr)
+        _err(f'[jarvis] расширение не ответило ({method}): {e}')
         return None
 
 
@@ -961,8 +640,7 @@ def describe_screen():
     вроде «не могу увидеть экран»)."""
     path = _extension_capture_screen()
     if not path:
-        print('[jarvis] скриншот не получен — расширение недоступно',
-              file=sys.stderr)
+        _err('[jarvis] скриншот не получен — расширение недоступно')
         return None
 
     try:
@@ -971,7 +649,7 @@ def describe_screen():
             _log('[vision] описал скриншот (openai)')
             return text
     except Exception as e:
-        print(f'[vision] облачная модель не описала экран: {e}', file=sys.stderr)
+        _err(f'[vision] облачная модель не описала экран: {e}')
     return None
 
 
@@ -1010,13 +688,13 @@ def is_vision_request(text):
 
 def run_vision_flow():
     """Полный цикл «посмотреть на экран»: скриншот → vision-описание → озвучка."""
-    print('[jarvis] vision-запрос: смотрю на экран...')
+    _log('[jarvis] vision-запрос: смотрю на экран...')
     emit_state('thinking')
     text = describe_screen()
     if text is None:
         text = ('Извините, мне пока нечем смотреть на экран: не найдено '
                 'vision-модели. Подробности в логах.')
-    print(f'[jarvis] ответ (vision): {text!r}')
+    _log(f'[jarvis] ответ (vision): {text!r}')
     emit_response(text)
     emit_state('speaking')
     try:
@@ -1233,7 +911,7 @@ def action_get_weather(args):
         )
         r.raise_for_status()
     except requests.RequestException as e:
-        print(f'[action:get_weather] ошибка: {e}', file=sys.stderr)
+        _err(f'[action:get_weather] ошибка: {e}')
         return 'Не удалось получить прогноз погоды.'
     data = r.json()
     cur = data.get('current', {})
@@ -1261,7 +939,7 @@ def action_get_rates(_args):
         r.raise_for_status()
         rates = (r.json() or {}).get('rates') or {}
     except (requests.RequestException, ValueError) as e:
-        print(f'[action:get_rates] ошибка: {e}', file=sys.stderr)
+        _err(f'[action:get_rates] ошибка: {e}')
         return ''
     usd_rub = rates.get('RUB')
     if not usd_rub:
@@ -1281,7 +959,6 @@ def action_get_news(_args):
     """Короткая сводка новостей из RSS-лент (см. NEWS_RSS_URLS — ленты
     пробуются по очереди). Возвращает фразу для озвучки или '' при
     ошибке/оффлайне."""
-    import xml.etree.ElementTree as ET
     for feed_url in NEWS_RSS_URLS:
         try:
             r = requests.get(feed_url,
@@ -1289,13 +966,12 @@ def action_get_news(_args):
                              timeout=8)
             r.raise_for_status()
         except requests.RequestException as e:
-            print(f'[action:get_news] лента {feed_url}: {e}', file=sys.stderr)
+            _err(f'[action:get_news] лента {feed_url}: {e}')
             continue
         try:
             root = ET.fromstring(r.content)
         except ET.ParseError as e:
-            print(f'[action:get_news] не удалось разобрать {feed_url}: {e}',
-                  file=sys.stderr)
+            _err(f'[action:get_news] не удалось разобрать {feed_url}: {e}')
             continue
         titles = []
         for item in root.iter('item'):
@@ -1333,7 +1009,7 @@ def _morning_summary():
         try:
             out[idx] = fn({})
         except Exception as e:
-            print(f'[morning] {fn.__name__}: {e}', file=sys.stderr)
+            _err(f'[morning] {fn.__name__}: {e}')
             out[idx] = ''
 
     outs = ['', '', '']
@@ -1357,12 +1033,12 @@ def _morning_music():
     try:
         action_set_volume({'percent': MORNING_MUSIC_VOLUME})
     except Exception as e:
-        print(f'[morning] громкость: {e}', file=sys.stderr)
+        _err(f'[morning] громкость: {e}')
     if MORNING_MUSIC_APP:
         try:
             result = action_open_app({'name': MORNING_MUSIC_APP})
         except Exception as e:
-            print(f'[morning] {MORNING_MUSIC_APP}: {e}', file=sys.stderr)
+            _err(f'[morning] {MORNING_MUSIC_APP}: {e}')
             result = 'Не нашёл приложение'
         if result and not result.startswith('Не нашёл приложение'):
             return 'Включил фоновую музыку.'
@@ -1371,7 +1047,7 @@ def _morning_music():
             action_open_url({'url': MORNING_MUSIC_URL})
             return 'Включил фоновую музыку.'
         except Exception as e:
-            print(f'[morning] музыка: {e}', file=sys.stderr)
+            _err(f'[morning] музыка: {e}')
     return ''
 
 
@@ -1410,7 +1086,7 @@ def _open_notes_app():
             try:
                 result = action_open_app({'name': app_name})
             except Exception as e:
-                print(f'[learning] заметки {app_name}: {e}', file=sys.stderr)
+                _err(f'[learning] заметки {app_name}: {e}')
                 result = 'Не нашёл приложение'
             if result and not result.startswith('Не нашёл приложение'):
                 return f'Открыл заметки: {app_name}.'
@@ -1420,7 +1096,7 @@ def _open_notes_app():
                 action_open_url({'url': item['url']})
                 return 'Открыл заметки в браузере.'
             except Exception as e:
-                print(f'[learning] заметки: {e}', file=sys.stderr)
+                _err(f'[learning] заметки: {e}')
     return ''
 
 
@@ -1436,7 +1112,7 @@ def action_learning_routine(_args):
             action_open_url({'url': url})
             opened_tabs += 1
         except Exception as e:
-            print(f'[learning] вкладка {url}: {e}', file=sys.stderr)
+            _err(f'[learning] вкладка {url}: {e}')
     if opened_tabs:
         parts.append(f'Открыл {opened_tabs} вкладки браузера: документация, '
                      f'Stack Overflow и YouTube.')
@@ -1450,7 +1126,7 @@ def action_learning_routine(_args):
         if result and not result.startswith('Не нашёл приложение'):
             parts.append('Открыл терминал для экспериментов.')
     except Exception as e:
-        print(f'[learning] терминал: {e}', file=sys.stderr)
+        _err(f'[learning] терминал: {e}')
 
     return ' '.join(parts) or 'Не получилось выполнить протокол исследования.'
 
@@ -1948,7 +1624,7 @@ def execute_tool(name, arguments):
     except subprocess.TimeoutExpired:
         result = f'Действие {name} не выполнилось за отведённое время.'
     except Exception as e:
-        print(f'[action:{name}] ошибка: {e}', file=sys.stderr)
+        _err(f'[action:{name}] ошибка: {e}')
         result = f'Не получилось выполнить действие.'
     # НЕ озвучиваем результат здесь: финальный ответ модели (который
     # озвучивается в run_command_flow) и так коротко подтвердит действие —
@@ -2531,7 +2207,9 @@ def transcribe(wav_path, whisper_model):
         # запаса) — для коротких команд на слабом микрофоне это теряет
         # первые слова. Добавляем запас 600 мс и не требуем длинной речи.
         vad_parameters={
-            'threshold': 0.5,
+            # Порог 0.35 вместо 0.5 по умолчанию: шёпот (даже после
+            # усиления микрофона) не должен вырезаться VAD как «не-речь».
+            'threshold': 0.35,
             'min_silence_duration_ms': 800,
             'speech_pad_ms': 600,
             'min_speech_duration_ms': 150,
@@ -2656,13 +2334,11 @@ def execute_local_tools(user_text, chat_messages):
             resp = _http.post(OLLAMA_CHAT_URL, json=payload, timeout=120)
             resp.raise_for_status()
         except requests.RequestException as e:
-            print(f'[ollama] ошибка запроса (рабочая модель): {e}',
-                  file=sys.stderr)
+            _err(f'[ollama] ошибка запроса (рабочая модель): {e}')
             try:
                 text = _ollama_generate_fallback(user_text, msgs[:-1])
             except requests.RequestException as e2:
-                print(f'[ollama] ошибка запроса (fallback): {e2}',
-                      file=sys.stderr)
+                _err(f'[ollama] ошибка запроса (fallback): {e2}')
             break
         _ollama_touched()
 
@@ -2685,9 +2361,9 @@ def execute_local_tools(user_text, chat_messages):
                     fargs = json.loads(fargs)
                 except json.JSONDecodeError:
                     fargs = {}
-            print(f'[jarvis] локальная модель выполняет: {fname}({fargs})')
+            _log(f'[jarvis] локальная модель выполняет: {fname}({fargs})')
             result = execute_tool(fname, fargs)
-            print(f'[jarvis] результат: {result}')
+            _log(f'[jarvis] результат: {result}')
             outcomes.append(f'{fname}: {result}')
             msgs.append({'role': 'tool', 'name': fname, 'content': result})
 
@@ -2751,17 +2427,16 @@ def ask_openai(user_text, chat_messages, with_tools=False):
                 resp.raise_for_status()
                 break
             except requests.Timeout:
-                print(f'[cloud] таймаут (попытка {_attempt + 1}) — повторяю',
-                      file=sys.stderr)
+                _warn(f'[cloud] таймаут (попытка {_attempt + 1}) — повторяю')
                 time.sleep(CLOUD_RETRY_DELAY_SEC)
                 continue
             except requests.RequestException as e:
                 _cloud_fault()
-                print(f'[cloud] ошибка запроса: {e}', file=sys.stderr)
+                _err(f'[cloud] ошибка запроса: {e}')
                 raise RuntimeError(f'облако недоступно: {e}')
         else:
             _cloud_fault()
-            print('[cloud] все попытки исчерпаны (перегрузка)', file=sys.stderr)
+            _err('[cloud] все попытки исчерпаны (перегрузка)')
             raise RuntimeError('облако перегружено — использую локальную модель')
         _cloud_success()
 
@@ -2785,9 +2460,9 @@ def ask_openai(user_text, chat_messages, with_tools=False):
                     fargs = json.loads(fargs)
                 except json.JSONDecodeError:
                     fargs = {}
-            print(f'[jarvis] вызов действия: {fname}({fargs})')
+            _log(f'[jarvis] вызов действия: {fname}({fargs})')
             result = execute_tool(fname, fargs)
-            print(f'[jarvis] результат: {result}')
+            _log(f'[jarvis] результат: {result}')
             chat_messages.append({
                 'role': 'tool',
                 'tool_call_id': call.get('id', ''),
@@ -2816,8 +2491,8 @@ def ask_llm(user_text, chat_messages):
 
     # 2) облако отвечает
     if not _cloud_ok():
-        print('[cloud] облако отключено (остывание) — '
-              'запасной ответ текстом рабочей модели', file=sys.stderr)
+        _warn('[cloud] облако отключено (остывание) — '
+              'запасной ответ текстом рабочей модели')
         return _local_fallback_answer(user_text, chat_messages, local_text)
 
     try:
@@ -2825,7 +2500,7 @@ def ask_llm(user_text, chat_messages):
         answer = ask_openai(
             _compose_cloud_prompt(user_text, local_outcomes), msgs)
     except Exception as e:
-        print(f'[cloud] облачный ответ не удался: {e}', file=sys.stderr)
+        _err(f'[cloud] облачный ответ не удался: {e}')
         return _local_fallback_answer(user_text, chat_messages, local_text)
 
     chat_messages[:] = msgs
@@ -2971,7 +2646,7 @@ def _voice_worker():
                 if not _speak_rhvoice(text):
                     _speak_piper(text)
         except Exception as e:
-            print(f'[voice] ошибка стрим-озвучки: {e}', file=sys.stderr)
+            _err(f'[voice] ошибка стрим-озвучки: {e}')
         # микро-пауза между предложениями, чтобы речь звучала связно
         time.sleep(0.15)
     if mic_muted:
@@ -3030,7 +2705,7 @@ def ask_openai_stream(user_text, msgs, claim, cancel_check, say,
                               stream=True)
         except requests.RequestException as e:
             _cloud_fault()
-            print(f'[cloud] стрим-запрос не прошёл: {e}', file=sys.stderr)
+            _err(f'[cloud] стрим-запрос не прошёл: {e}')
             time.sleep(CLOUD_RETRY_DELAY_SEC)
             continue
         if resp.status_code not in (429, 500, 502, 503, 504):
@@ -3127,8 +2802,8 @@ def ask_llm_streaming(user_text, chat_messages, holder=None, max_sentences=None)
     local_text, local_outcomes = execute_local_tools(user_text, chat_messages)
 
     if not _cloud_ok():
-        print('[cloud] облако отключено (остывание) — '
-              'запасной ответ текстом рабочей модели', file=sys.stderr)
+        _warn('[cloud] облако отключено (остывание) — '
+              'запасной ответ текстом рабочей модели')
         return (_local_fallback_answer(
             user_text, chat_messages, local_text), False)
 
@@ -3157,7 +2832,7 @@ def ask_llm_streaming(user_text, chat_messages, holder=None, max_sentences=None)
             cancel_check=lambda: service.stop_event.is_set(),
             say=say)
     except Exception as e:
-        print(f'[cloud] стрим-ответ не удался: {e}', file=sys.stderr)
+        _err(f'[cloud] стрим-ответ не удался: {e}')
         return (_local_fallback_answer(
             user_text, chat_messages, local_text), False)
 
@@ -3167,8 +2842,7 @@ def ask_llm_streaming(user_text, chat_messages, holder=None, max_sentences=None)
     if not streamed or msgs is None:
         # Облако ничего не озвучило (обрыв стрима) — запасной путь: читаем
         # то, что успела выполнить локальная модель.
-        print('[cloud] стрим пустой — запасной ответ рабочей модели',
-              file=sys.stderr)
+        _warn('[cloud] стрим пустой — запасной ответ рабочей модели')
         return (_local_fallback_answer(
             user_text, chat_messages, local_text), False)
 
@@ -3177,8 +2851,7 @@ def ask_llm_streaming(user_text, chat_messages, holder=None, max_sentences=None)
 
 
 def _which(cmd):
-    from shutil import which
-    return which(cmd) is not None
+    return shutil.which(cmd) is not None
 
 
 def _piper_bin():
@@ -3388,7 +3061,6 @@ def _stream_edge_to_ffplay(text):
     _player_proc = proc
     heard_audio = False
     try:
-        import asyncio
         import edge_tts
 
         async def _synth():
@@ -3404,7 +3076,7 @@ def _stream_edge_to_ffplay(text):
 
         asyncio.run(_synth())
     except Exception as e:
-        print(f'[tts] edge-tts поток: {e}', file=sys.stderr)
+        _err(f'[tts] edge-tts поток: {e}')
     finally:
         try:
             proc.stdin.close()
@@ -3435,7 +3107,6 @@ def _speak_edge(text):
     if _which('ffplay') and _stream_edge_to_ffplay(text):
         return True
     try:
-        import asyncio
         import edge_tts
 
         audio_path = os.path.join(tempfile.gettempdir(), 'jarvis_response.mp3')
@@ -3450,8 +3121,7 @@ def _speak_edge(text):
             return False
         return _play_wav(audio_path)
     except Exception as e:
-        print(f'[tts] edge-tts недоступен ({e}) — использую офлайн-голос',
-              file=sys.stderr)
+        _warn(f'[tts] edge-tts недоступен ({e}) — использую офлайн-голос')
         return False
 
 
@@ -3504,10 +3174,9 @@ def _init_rhvoice():
             _rhvoice = (tts, voice)
             _log(f'[tts] RHVoice: голос {voice} (естественный русский синтез)')
         except Exception as e:
-            print(f'[tts] RHVoice недоступен ({e}) — использую Piper (irina). '
+            _warn(f'[tts] RHVoice недоступен ({e}) — использую Piper (irina). '
                   'Для естественного голоса: sudo pacman -S rhvoice '
-                  'rhvoice-language-russian rhvoice-voice-elena',
-                  file=sys.stderr)
+                  'rhvoice-language-russian rhvoice-voice-elena')
             _rhvoice = False
     return _rhvoice
 
@@ -3527,31 +3196,18 @@ def _speak_rhvoice(text):
             f.write(data)
         return _play_wav(wav_path)
     except Exception as e:
-        print(f'[tts] ошибка RHVoice: {e}', file=sys.stderr)
+        _err(f'[tts] ошибка RHVoice: {e}')
         return False
 
 
 # ============================== PIPER =====================================
 
-def _piper_bin():
-    """Piper ставится pip-ом в тот же venv, что и демон, поэтому его бинарь
-    лежит рядом с интерпретатором, но НЕ попадает в PATH systemd-сервиса."""
-    on_path = shutil.which('piper')
-    if on_path:
-        return on_path
-    in_venv = os.path.join(os.path.dirname(sys.executable), 'piper')
-    if os.path.exists(in_venv):
-        return in_venv
-    return None
-
-
 def _speak_piper(text):
     """Синтезирует речь через Piper CLI (женский голос irina) в wav."""
     piper_bin = _piper_bin()
     if not piper_bin:
-        print('[piper] бинарь "piper" не найден — установите piper-tts '
-              '(pip install piper-tts) или перезапустите install.sh',
-              file=sys.stderr)
+        _err('[piper] бинарь "piper" не найден — установите piper-tts '
+             '(pip install piper-tts) или перезапустите install.sh')
         return
 
     wav_path = os.path.join(tempfile.gettempdir(), 'jarvis_response.wav')
@@ -3571,10 +3227,10 @@ def _speak_piper(text):
             stderr=subprocess.PIPE,
         )
     except subprocess.CalledProcessError as e:
-        print(f'[piper] ошибка синтеза: {e.stderr.decode(errors="ignore")}', file=sys.stderr)
+        _err(f'[piper] ошибка синтеза: {e.stderr.decode(errors="ignore")}')
         return
     except FileNotFoundError:
-        print(f'[piper] бинарь "{piper_bin}" не найден — проверьте установку piper-tts', file=sys.stderr)
+        _err(f'[piper] бинарь "{piper_bin}" не найден — проверьте установку piper-tts')
         return
 
     _play_wav(wav_path)
@@ -3610,11 +3266,11 @@ def _play_wav(wav_path):
         if proc.returncode == 0:
             return True
         # плеер не смог (или его убили) — пробуем следующий
-        print(f'[player] {player} не смог воспроизвести ответ '
-              f'(код {proc.returncode})', file=sys.stderr)
+        _err(f'[player] {player} не смог воспроизвести ответ '
+             f'(код {proc.returncode})')
 
-    print('[player] ни один плеер не воспроизвёл ответ '
-          '(нет paplay/pw-play/ffplay/aplay?)', file=sys.stderr)
+    _err('[player] ни один плеер не воспроизвёл ответ '
+         '(нет paplay/pw-play/ffplay/aplay?)')
     return False
 
 
@@ -3668,8 +3324,8 @@ def _play_attention_sound():
         if not _play_wav(_ATTENTION_WAV):
             raise RuntimeError('ни один плеер не воспроизвёл сигнал')
     except Exception as e:
-        print(f'[sound] не удалось проиграть сигнал активации ({e}) — '
-              'голосовое «Слушаю»', file=sys.stderr)
+        _warn(f'[sound] не удалось проиграть сигнал активации ({e}) — '
+              'голосовое «Слушаю»')
         try:
             speak('Слушаю')
         except Exception:
@@ -3691,6 +3347,51 @@ def _build_wake_pattern():
         lead_cls = '[еэ]' if lead in 'еэ' else re.escape(lead)
         tail_cls = '[аоуы]' if tail in 'аоуы' else re.escape(tail)
         return re.compile(f'^[йъь]?{lead_cls}{re.escape(core)}{tail_cls}')
+
+
+# Слова, где «ева/эва» — лишь окончание: на них ассистент просыпаться
+# не должен, даже если нечёткий матч посчитает их «похожими».
+_WAKE_FALSE_FRIENDS = frozenset((
+    'дева', 'нева', 'лева', 'дива', 'лива', 'слива', 'нива', 'тива',
+    'тиво', 'вева', 'еве', 'ёва', 'йова', 'жива', 'живе', 'рева',
+    'евро', 'евра', 'евре', 'евва',
+))
+# Порог нечёткого совпадения слова с «Ева» (SequenceMatcher.ratio):
+# 0.75 пропускает «йева», «еваа»-подобные огрехи модели, но отсекает
+# «ава», «тва», «ява» и явно посторонние слова.
+_WAKE_FUZZY_RATIO = 0.75
+
+
+def _wake_fuzzy_match(token):
+    """Нечёткое совпадение слова с одним из вариантов слова-активатора.
+    Ловит искажения маленькой Vosk-модели («йова», «вева», «еваа»),
+    которые точный шаблон уже не видит. Слово должно НАЧИНАТЬСЯ как
+    «Ева» (возможен призвук «й/ъ/ь») — иначе это чужое слово («рева»,
+    «дева», «евро»), в котором «ева» лишь буквально присутствует."""
+    if len(token) < 3 or len(token) > 5:
+        return False
+    if token in _WAKE_FALSE_FRIENDS:
+        return False
+    if not re.match(r'^[йъь]?[еэ]', token):
+        return False
+    for w in WAKE_WORDS:
+        w = w.lower().strip()
+        if not w:
+            continue
+        if difflib.SequenceMatcher(None, token, w).ratio() >= _WAKE_FUZZY_RATIO:
+            return True
+    return False
+
+
+def _wake_token_match(token):
+    """Длина совпадения начала слова с словом-активатором: точный шаблон
+    даёт длину совпадения в начале слова, нечёткий — всё слово целиком.
+    Возвращает 0, если слово не похоже на активацию."""
+    token = token.lower()
+    m = _WAKE_PATTERN.search(token)
+    if m:
+        return m.end()
+    return len(token) if _wake_fuzzy_match(token) else 0
     return re.compile(r'^[йъь]?[еэ][в][аоуы]')
 
 
@@ -3699,11 +3400,12 @@ _WAKE_PATTERN = _build_wake_pattern()
 
 def contains_wake_word(text):
     """True, если в распознанном тексте есть слово-активатор — точное
-    («ева», «эва») или похожие варианты распознавания («ево», «эво»,
-    «еву», «йева»). Слова проверяем отдельными токенами, чтобы «дева»,
+    («ева», «эва»), похожие варианты распознавания («ево», «эво»,
+    «еву», «йева») или нечёткие искажения маленькой модели («йова»,
+    «вева»). Слова проверяем отдельными токенами, чтобы «дева»,
     «нева», «лева» не активировали ассистента случайно."""
     text = text.lower()
-    return any(_WAKE_PATTERN.search(t) for t in re.findall(r'[а-яё]+', text))
+    return any(_wake_token_match(t) > 0 for t in re.findall(r'[а-яё]+', text))
 
 
 def strip_wake_word(text):
@@ -3713,10 +3415,10 @@ def strip_wake_word(text):
     m = re.match(r'^(?P<pre>[^а-яё]*)(?P<word>[а-яё]+)', text, re.IGNORECASE)
     if not m:
         return text
-    wm = _WAKE_PATTERN.match(m.group('word').lower())
-    if not wm:
+    match_len = _wake_token_match(m.group('word').lower())
+    if not match_len:
         return text
-    cut = m.start('word') + wm.end()
+    cut = m.start('word') + match_len
     return text[cut:].lstrip(' ,.…-:')
 
 
@@ -3821,7 +3523,7 @@ def worker_loop():
             'hotkey': 'Режим: активация только по горячей клавише.',
             'both': 'Говорите "Ева" или нажмите горячую клавишу.',
         }
-        print(f'[jarvis] готов. {mode_hint.get(ACTIVATION_MODE, "")}')
+        _log(f'[jarvis] готов. {mode_hint.get(ACTIVATION_MODE, "")}')
         emit_state('idle')
 
         # Голосовой воркер для стрим-озвучки ответов (предложения текста,
@@ -3855,9 +3557,38 @@ def worker_loop():
                 _log('[jarvis] слушаю новую команду...')
             recognizer.Reset()
 
+            # Режим непрерывного диалога (как у Алисы): после ответа Ева
+            # продолжает слушать уточнения БЕЗ слова-активатора, пока
+            # пользователь говорит. Каждая реплика продлевает диалог;
+            # тишина (DIALOGUE_TIMEOUT_SECONDS) или пауза возвращают
+            # в обычное ожидание «Ева».
+            if (status == 'done' and DIALOGUE_MODE_ENABLED
+                    and service.activation_mode != 'hotkey'):
+                _log('[jarvis] диалоговый режим: слушаю уточнения без «Ева»...')
+                try:
+                    while not service.stop_event.is_set():
+                        if not _dialogue_listen(service, recognizer):
+                            break
+                        recognizer.Reset()
+                        try:
+                            status = run_command_flow(
+                                vosk_model, chat_messages, dialogue=True)
+                        except Exception as e:
+                            _log(f'[jarvis] ошибка в обработке команды: {e}')
+                            status = 'done'
+                        recognizer.Reset()
+                        if status != 'done':
+                            break
+                except Exception as e:
+                    _log(f'[jarvis] ошибка в диалоговом режиме: {e}')
+                _log('[jarvis] возврат к ожиданию «Ева»')
 
-def run_command_flow(vosk_model, chat_messages):
+
+def run_command_flow(vosk_model, chat_messages, dialogue=False):
     """Полный цикл одной команды: запись → распознавание → LLM → озвучка.
+
+    dialogue — True, если это продолжение разговора в диалоговом режиме
+    (без слова-активатора): сигнал активации тогда не играется.
 
     Возвращает:
       'done'        — команда обработана;
@@ -3865,15 +3596,16 @@ def run_command_flow(vosk_model, chat_messages):
       'interrupted' — во время обработки/озвучки снова сказано «Ева»:
                       старый запрос отменён, нужно слушать новую команду.
     """
-    print('[jarvis] активация, слушаю команду...')
+    _log('[jarvis] активация, слушаю команду...')
     emit_state('listening')
 
     # Каждое действие бэкенды могут дублировать — выполняем только первым
     _action_done.clear()
 
     # Короткий звуковой сигнал вместо голосового «Слушаю» (в hotkey-режиме
-    # не нужен — там пользователь сам решил активировать клавишей)
-    if service.activation_mode != 'hotkey':
+    # не нужен — там пользователь сам решил активировать клавишей; в
+    # диалоговом режиме тоже — это уже продолжение разговора)
+    if service.activation_mode != 'hotkey' and not dialogue:
         try:
             _play_attention_sound()
         except Exception:
@@ -3900,14 +3632,19 @@ def run_command_flow(vosk_model, chat_messages):
             command_text = ''
 
         command_text = strip_wake_word(command_text)
-        print(f'[jarvis] распознано: {command_text!r}')
+        _log(f'[jarvis] распознано: {command_text!r}')
 
         if command_text:
             break
 
+        # В диалоговом режиме не переспрашиваем: триггером мог стать
+        # фоновый шум, и голосовое «Не расслышал» — это ответ на шум.
+        if dialogue:
+            break
+
         # Не расслышали — переспрашиваем (кроме последней попытки)
         if attempt < RECORD_RETRIES:
-            print('[jarvis] не расслышал, переспрашиваю...')
+            _log('[jarvis] не расслышал, переспрашиваю...')
             emit_state('listening')
             try:
                 speak('Не расслышал. Повторите, пожалуйста.')
@@ -3933,7 +3670,7 @@ def run_command_flow(vosk_model, chat_messages):
     # обращения к LLM — счёт идёт на десятки миллисекунд, а не секунды.
     fast_answer = find_fast_route(command_text)
     if fast_answer is not None:
-        print(f'[jarvis] ответ (быстрый роутер): {fast_answer!r}')
+        _log(f'[jarvis] ответ (быстрый роутер): {fast_answer!r}')
         emit_response(fast_answer)
         emit_state('speaking')
         try:
@@ -3946,7 +3683,7 @@ def run_command_flow(vosk_model, chat_messages):
     # Быстрый ответ на простые фразы («который час», «привет») — без LLM
     shortcut = find_shortcut(command_text)
     if shortcut is not None:
-        print(f'[jarvis] ответ (шорткат): {shortcut!r}')
+        _log(f'[jarvis] ответ (шорткат): {shortcut!r}')
         emit_response(shortcut)
         emit_state('speaking')
         try:
@@ -4019,7 +3756,7 @@ def run_command_flow(vosk_model, chat_messages):
     # предложений на простых вопросах (стрим уже урезал озвучку — здесь
     # то же самое для текста в меню расширения).
     answer = _humanize(answer, is_complex_request(command_text))
-    print(f'[jarvis] ответ: {answer!r}')
+    _log(f'[jarvis] ответ: {answer!r}')
     emit_response(answer)
 
     # Обрезаем историю, чтобы не раздувать контекст (system-сообщение
@@ -4098,6 +3835,9 @@ def _wake_listen(service, recognizer):
             partial = json.loads(recognizer.PartialResult())
             text = partial.get('partial', '')
 
+        if WAKE_DEBUG and text:
+            _log(f'[wake] слышу: {text!r}')
+
         if not contains_wake_word(text):
             continue
 
@@ -4105,6 +3845,80 @@ def _wake_listen(service, recognizer):
         recognizer.Reset()
         return True
 
+    return False
+
+
+def _dialogue_listen(service, recognizer):
+    """Режим непрерывного диалога (как у Алисы): после ответа слушаем
+    следующую реплику БЕЗ слова-активатора.
+
+    Возвращает True, если реплика услышана (пора обрабатывать команду);
+    False — если диалог пора заканчивать: наступила тишина
+    (DIALOGUE_TIMEOUT_SECONDS), нажата пауза, сказано одно «Ева» либо
+    остановлен сервис.
+    """
+    # 1) Пауза-защита от эха: после озвучки собственный голос Евы ещё
+    #    несколько мгновений идёт с колонок в микрофон. Ждём, пока либо
+    #    очередь кончится (тишина наступила раньше), либо пройдёт
+    #    DIALOGUE_ECHO_GUARD_SECONDS. Начало фразы пользователя, сказанной
+    #    в этот момент, не теряется — его сохраняет кольцевой буфер
+    #    audio_tail, и record_command подхватит его как initial_frames.
+    guard_end = time.monotonic() + DIALOGUE_ECHO_GUARD_SECONDS
+    while not service.stop_event.is_set() and time.monotonic() < guard_end:
+        try:
+            audio_queue.get(timeout=0.1)
+        except queue.Empty:
+            break
+
+    recognizer.Reset()
+    deadline = time.monotonic() + DIALOGUE_TIMEOUT_SECONDS
+    block_seconds = BLOCK_SIZE / SAMPLE_RATE
+    min_speech_blocks = max(1, round(DIALOGUE_MIN_SPEECH_SECONDS / block_seconds))
+    speech_blocks = 0
+    emit_state('dialog')
+    while not service.stop_event.is_set():
+        if service.paused:
+            emit_state('idle')
+            return False
+        if service.manual_activation_event.is_set():
+            service.manual_activation_event.clear()
+            return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            emit_state('idle')
+            return False
+        try:
+            chunk = audio_queue.get(timeout=min(0.3, remaining))
+        except queue.Empty:
+            continue
+        # Репликой считается только «живая» речь: непрерывный не-тихий звук
+        # длительностью DIALOGUE_MIN_SPEECH_SECONDS + распознанный текст.
+        # Щелчки, кашель, фоновый телевизор команду не запускают (тихие
+        # блоки сбрасывают счётчик).
+        if is_silence(rms(chunk)):
+            speech_blocks = 0
+        else:
+            speech_blocks += 1
+        if recognizer.AcceptWaveform(chunk):
+            text = json.loads(recognizer.Result()).get('text', '')
+            if text and speech_blocks >= min_speech_blocks:
+                # Сказано только слово-активатор («Ева» и пауза) — это
+                # не реплика, а сигнал «диалог окончен»: выходим тихо,
+                # без переспроса.
+                if contains_wake_word(text) and not strip_wake_word(text):
+                    emit_state('idle')
+                    return False
+                return True
+        else:
+            text = json.loads(recognizer.PartialResult()).get('partial', '').strip()
+            # Промежуточный текст в пару символов при живой речи — уже
+            # голос, а не шум. Если в нём только слово-активатор —
+            # ждём продолжения фразы.
+            if (speech_blocks >= min_speech_blocks
+                    and len(text) >= 2
+                    and (strip_wake_word(text) or not contains_wake_word(text))):
+                return True
+    emit_state('idle')
     return False
 
 

@@ -25,6 +25,7 @@ MODELS_DIR="$APP_DIR/models"
 
 # Проверяет sha256 файла. Возвращает 0 при совпадении.
 sha256_check() {
+    
     local file="$1" expected="$2" tool actual
     if [ ! -f "$file" ]; then
         return 1
@@ -124,6 +125,7 @@ fi
 
 echo "==> Копирую демон..."
 cp "$SCRIPT_DIR"/backend/jarvis_daemon.py "$APP_DIR"/
+cp "$SCRIPT_DIR"/backend/config.py "$APP_DIR"/
 cp "$SCRIPT_DIR"/backend/requirements.txt "$APP_DIR"/
 
 echo "==> Создаю виртуальное окружение и ставлю Python-зависимости..."
@@ -252,7 +254,7 @@ else
 fi
 echo "    Облачный режим настроен по умолчанию — БЕСПЛАТНЫЙ"
 echo "    DeepSeek V4 Flash Free через opencode.ai/zen (без ключа)."
-echo "    Для платного провайдера поменяйте в jarvis_daemon.py:"
+echo "    Для платного провайдера поменяйте в backend/config.py:"
 echo "        OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL"
 
 echo "==> Устанавливаю systemd --user юнит..."

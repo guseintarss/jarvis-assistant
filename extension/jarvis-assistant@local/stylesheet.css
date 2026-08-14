@@ -28,6 +28,11 @@
     box-shadow: 0 0 10px 3px rgba(51, 255, 158, 0.75);
 }
 
+.jarvis-state-dialog .jarvis-core {
+    background-color: #4da6ff;
+    box-shadow: 0 0 10px 3px rgba(77, 166, 255, 0.75);
+}
+
 .jarvis-state-thinking .jarvis-core {
     background-color: #ffb020;
     box-shadow: 0 0 10px 3px rgba(255, 176, 32, 0.75);
