@@ -1,4 +1,4 @@
-"""Клиент облачной LLM: возвращает ТОЛЬКО JSON-план действий.
+"""Клиент облачной LLM: возвращает ТОЛЬКО JSON-план действий (ЧАСТЬ 5).
 
 Принцип безопасности: облако никогда не получает инструменты исполнения —
 ему передаётся:
@@ -13,6 +13,11 @@
 поля command/shell/script/exec запрещены валидатором, а путей вне
 allowed_roots не существует в её «вселенной».
 
+Провайдеры — цепочка с fallback (CloudRouter, ЧАСТЬ 5): локальная Ollama
+-> DeepSeek -> GigaChat -> YandexGPT -> opencode.ai. Каждый ответ
+валидируется; невалидный план не убивает запрос — пробуем следующего
+провайдера. Rate limiter + circuit breaker защищают от перегрузок.
+
 Приватные данные не отправляются: ни переменные окружения, ни содержимое
 ~/.ssh, ~/.config и т.п. — в запрос попадает только снимок окружения,
 собранный функциями ниже.
@@ -22,13 +27,13 @@ import json
 import os
 import platform
 import re
-import time
-
-import requests
+import shutil
 
 from jarvis import config
 from jarvis import logger
 from jarvis import plan as plan_mod
+
+from jarvis.cloud.router import CloudRouter
 
 # Паттерн «вытащить JSON из ответа» (модели иногда оборачивают в ```json)
 _JSON_RE = re.compile(r'\{.*\}', re.DOTALL)
@@ -43,7 +48,6 @@ def environment_snapshot():
     def have(*names):
         return [n for n in names if shutil.which(n)]
 
-    import shutil
     session = os.environ.get('XDG_SESSION_TYPE', 'unknown')
     desktop = os.environ.get('XDG_CURRENT_DESKTOP', 'unknown')
     try:
@@ -110,12 +114,12 @@ def _system_prompt(policy, registry):
 class CloudLLM:
     """Облачная LLM, возвращающая валидированный JSON-план."""
 
-    def __init__(self, policy, registry, guard, log=None):
+    def __init__(self, policy, registry, guard, log=None, router=None):
         self.policy = policy
         self.registry = registry
         self.guard = guard
         self.log = log or logger.get_logger()
-        self._session = requests.Session()
+        self.router = router or CloudRouter(log=log)
 
     # --------------------------- запрос ------------------------------------
 
@@ -123,56 +127,41 @@ class CloudLLM:
         """user_request -> (ok, plan|None, message).
 
         plan уже прошёл validate_plan. При недоступности облака ok=False
-        и message объясняет проблему пользователю.
+        и message объясняет проблему пользователю. Провайдеры пробуются
+        по цепочке; невалидный план — тоже неудача провайдера.
         """
         if not self.policy.cloud.get('enabled', True) or not config.CLOUD_ENABLED:
             return False, None, 'Облачная модель отключена политикой.'
 
         payload = self._build_payload(user_request)
-        last_error = 'облако не ответило'
-        for attempt in range(config.CLOUD_RETRIES + 1):
-            try:
-                resp = self._session.post(
-                    f'{config.CLOUD_BASE_URL}/chat/completions',
-                    headers=self._headers(),
-                    json=payload,
-                    timeout=config.CLOUD_TIMEOUT_SEC)
-                if resp.status_code == 429:
-                    last_error = 'облако перегружено (429), попробую ещё раз'
-                    time.sleep(config.CLOUD_RETRY_DELAY_SEC)
-                    continue
-                resp.raise_for_status()
-                content = self._extract_content(resp.json())
-                raw = self._parse_json(content)
-                if raw is None:
-                    last_error = ('модель вернула не-JSON ответ; '
-                                  'план отклонён')
-                    continue
-                ok, error, plan = plan_mod.validate_plan(
-                    raw, self.policy, self.registry, self.guard)
-                if not ok:
-                    last_error = f'план отклонён валидатором: {error}'
-                    self.log.event('cloud_plan_rejected', error=error)
-                    continue
-                self.log.event('cloud_plan', steps=len(plan['steps']))
-                return True, plan, ''
-            except requests.RequestException as exc:
-                last_error = f'ошибка сети: {exc}'
-            except (ValueError, KeyError, TypeError) as exc:
-                last_error = f'неожиданный ответ облака: {exc}'
+        last_error = 'нет доступных провайдеров'
+        for provider_name, ok, content, error in self.router.attempts(payload):
+            if not ok:
+                last_error = f'{provider_name}: {error}'
+                continue
+            raw = self._parse_json(content)
+            if raw is None:
+                last_error = (f'{provider_name}: модель вернула не-JSON ответ; '
+                              'план отклонён')
+                continue
+            ok_plan, plan_error, plan = plan_mod.validate_plan(
+                raw, self.policy, self.registry, self.guard)
+            if not ok_plan:
+                last_error = f'{provider_name}: план отклонён валидатором: {plan_error}'
+                self.log.event('cloud_plan_rejected', provider=provider_name,
+                               error=plan_error)
+                continue
+            self.log.event('cloud_plan', provider=provider_name,
+                           steps=len(plan['steps']))
+            return True, plan, ''
 
         self.log.event('cloud_failed', error=last_error)
         return False, None, last_error
 
     # --------------------------- сборка ------------------------------------
 
-    def _headers(self):
-        headers = {'Content-Type': 'application/json'}
-        if config.CLOUD_API_KEY:
-            headers['Authorization'] = f'Bearer {config.CLOUD_API_KEY}'
-        return headers
-
     def _build_payload(self, user_request):
+        """Payload БЕЗ model — модель подставляет каждый провайдер."""
         tools = [t.describe() for t in
                  (self.registry.get(n) for n in self.registry.enabled_names())
                  if t is not None]
@@ -193,7 +182,6 @@ class CloudLLM:
             },
         }
         return {
-            'model': config.CLOUD_MODEL,
             'messages': [
                 {'role': 'system',
                  'content': _system_prompt(self.policy, self.registry)},
@@ -205,13 +193,6 @@ class CloudLLM:
         }
 
     # --------------------------- разбор ------------------------------------
-
-    @staticmethod
-    def _extract_content(data):
-        """content модели; reasoning_content игнорируется (это «мысли»)."""
-        choice = data['choices'][0]
-        message = choice.get('message', {})
-        return message.get('content') or ''
 
     @staticmethod
     def _parse_json(content):

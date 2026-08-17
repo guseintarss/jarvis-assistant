@@ -67,6 +67,37 @@ CLOUD_RETRIES = 2
 CLOUD_RETRY_DELAY_SEC = 2.0
 CLOUD_MAX_TOKENS = 1500
 
+# ============================== ЦЕПОЧКА ПРОВАЙДЕРОВ (ЧАСТЬ 5) ================
+# Порядок попыток: локальная Ollama -> DeepSeek -> GigaChat -> YandexGPT ->
+# opencode.ai (бесплатный шлюз без ключа). Провайдер без ключа/токена
+# пропускается. Секреты — только из окружения.
+# Ограничения: RATE_LIMIT_PER_MINUTE запросов на провайдера в минуту;
+# после RATE_LIMIT_COOLDOWN_FAILURES подряд неудач провайдер уходит
+# в RATE_LIMIT_COOLDOWN_SEC на 60 секунд (circuit breaker).
+
+OLLAMA_URL = os.environ.get('OLLAMA_URL', 'http://127.0.0.1:11434')
+OLLAMA_MODEL = os.environ.get('OLLAMA_MODEL', 'qwen2.5-coder:1.5b')
+OLLAMA_TIMEOUT_SEC = 30
+
+DEEPSEEK_API_KEY = os.environ.get('DEEPSEEK_API_KEY', '').strip()
+DEEPSEEK_BASE_URL = os.environ.get('DEEPSEEK_BASE_URL',
+                                   'https://api.deepseek.com')
+DEEPSEEK_MODEL = os.environ.get('DEEPSEEK_MODEL', 'deepseek-chat')
+
+GIGACHAT_CLIENT_ID = os.environ.get('GIGACHAT_CLIENT_ID', '').strip()
+GIGACHAT_CLIENT_SECRET = os.environ.get('GIGACHAT_CLIENT_SECRET', '').strip()
+GIGACHAT_AUTH_URL = ('https://ngw.devices.sberbank.ru:9443/api/v2/oauth')
+GIGACHAT_API_URL = ('https://gigachat.devices.sberbank.ru/api/v1/chat/completions')
+GIGACHAT_MODEL = 'GigaChat'
+
+YANDEX_API_KEY = os.environ.get('YANDEX_API_KEY', '').strip()
+YANDEX_API_URL = 'https://llm.api.cloud.yandex.net/v1/chat/completions'
+YANDEX_MODEL = os.environ.get('YANDEX_MODEL', 'yandexgpt-lite')
+
+RATE_LIMIT_PER_MINUTE = int(os.environ.get('JARVIS_RATE_LIMIT_PER_MINUTE', '12'))
+RATE_LIMIT_COOLDOWN_SEC = int(os.environ.get('JARVIS_RATE_COOLDOWN_SEC', '60'))
+RATE_LIMIT_COOLDOWN_FAILURES = 2
+
 # ============================== ГОЛОС ======================================
 # Голосовой режим демона (слово-активатор «Ева» -> STT -> пайплайн -> TTS).
 # Все компоненты опциональны: если нет моделей/микрофона, демон работает
