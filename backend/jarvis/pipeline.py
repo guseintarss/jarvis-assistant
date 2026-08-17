@@ -18,6 +18,7 @@ from jarvis import fastroute
 from jarvis import intents
 from jarvis import logger
 from jarvis.plan import plan_summary
+from jarvis.recovery import error_handler
 
 
 class Assistant:
@@ -76,6 +77,14 @@ class Assistant:
                 and pred['confidence'] >= self.classifier.confidence_threshold):
             ok, message, data = self.executor.run_intent(pred['intent'],
                                                          pred['slots'])
+            if not ok and message:
+                # ЧАСТЬ 4: подсказки при неудаче (похожие файлы/приложения,
+                # примеры команд) — детерминированно, без нейросети
+                message, _ = error_handler.enhance(
+                    pred['intent'], message,
+                    query=pred['slots'].get('query')
+                    or pred['slots'].get('path')
+                    or pred['slots'].get('name') or text)
             result = {'response': message or 'Готово.',
                       'intent': pred['intent'],
                       'confidence': pred['confidence'],
@@ -106,14 +115,15 @@ class Assistant:
         if self.cloud is None:
             return {'response': ('Этот запрос сложнее моих локальных навыков, '
                                  'а облачная модель сейчас недоступна. '
-                                 'Попробуйте переформулировать проще.'),
+                                 + error_handler.cloud_fallback_hint()),
                     'intent': 'chat', 'confidence': pred['confidence'],
                     'route': 'cloud_unavailable'}
 
         ok, plan, error = self.cloud.request_plan(text)
         if not ok:
             return {'response': (f'Не удалось получить план от облачной '
-                                 f'модели: {error}'),
+                                 f'модели: {error}\n\n'
+                                 + error_handler.cloud_fallback_hint()),
                     'intent': pred['intent'],
                     'confidence': pred['confidence'],
                     'route': 'cloud_error'}
