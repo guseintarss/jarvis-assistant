@@ -17,7 +17,6 @@
 import datetime
 import os
 import re
-import sqlite3
 import subprocess
 
 from jarvis import config
@@ -167,58 +166,8 @@ def _fmt_duration(seconds):
 
 # ============================== НАПОМИНАНИЯ =================================
 
-
-class ReminderStore:
-    """Хранилище напоминаний (SQLite). Планировщик из ЧАСТИ 3 читает его же."""
-
-    def __init__(self, db_path=None):
-        self.db_path = db_path or config.REMINDERS_DB_PATH
-        os.makedirs(os.path.dirname(os.path.abspath(self.db_path)),
-                    exist_ok=True)
-        self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self._conn.execute('PRAGMA journal_mode=WAL')
-        self._conn.executescript('''
-            CREATE TABLE IF NOT EXISTS reminders (
-                id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                when_ts    TEXT NOT NULL,     -- ISO, момент срабатывания
-                text       TEXT NOT NULL,
-                done       INTEGER NOT NULL DEFAULT 0,
-                fired      INTEGER NOT NULL DEFAULT 0,
-                created_ts TEXT NOT NULL
-            );
-        ''')
-        self._conn.commit()
-
-    def add(self, when_ts, text):
-        cur = self._conn.execute(
-            'INSERT INTO reminders (when_ts, text, created_ts) VALUES (?, ?, ?)',
-            (when_ts, text[:500], datetime.datetime.now().isoformat()))
-        self._conn.commit()
-        return cur.lastrowid
-
-    def upcoming(self):
-        """Активные (не сработавшие) напоминания, ближайшие первыми."""
-        cur = self._conn.execute(
-            'SELECT id, when_ts, text FROM reminders WHERE fired = 0 '
-            'ORDER BY when_ts')
-        return cur.fetchall()
-
-    def mark_fired(self, reminder_id):
-        self._conn.execute('UPDATE reminders SET fired = 1 WHERE id = ?',
-                           (reminder_id,))
-        self._conn.commit()
-
-    def delete(self, reminder_id):
-        self._conn.execute('DELETE FROM reminders WHERE id = ?',
-                           (reminder_id,))
-        self._conn.commit()
-
-    def clear(self):
-        self._conn.execute('DELETE FROM reminders')
-        self._conn.commit()
-
-    def close(self):
-        self._conn.close()
+from jarvis.proactive.reminders import ReminderStore  # noqa: E402 — единый
+# источник правды: сюда пишут инструменты, отсюда читает планировщик.
 
 
 def set_reminder(time=None, day=None, text=''):

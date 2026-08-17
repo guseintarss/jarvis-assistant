@@ -180,3 +180,44 @@ NEWS_FEEDS = [
     'https://www.securitylab.ru/_services/export/rss/',
 ]
 NEWS_MAX_ITEMS = 5
+
+# ============================== ПРОАКТИВ (ЧАСТЬ 3) ==========================
+# Планировщик (jarvis/proactive/scheduler.py) живёт в демоне: каждую секунду
+# проверяет напоминания, каждые PROACTIVE_TRIGGER_INTERVAL_SEC — триггеры.
+# Напоминания переживают перезапуск демона: просроченные срабатывают сразу
+# при старте.
+
+PROACTIVE_POLL_INTERVAL_SEC = 1.0
+PROACTIVE_TRIGGER_INTERVAL_SEC = 10.0
+
+# Триггеры по умолчанию. Формат:
+#   {'type': 'process', 'name': 'code',   'title': '...', 'text': '...'}
+#   {'type': 'file',    'path': '/tmp/x', 'title': '...', 'text': '...'}
+# Срабатывают один раз при появлении условия и снова — после его исчезновения.
+# Можно переопределить целиком через JARVIS_PROACTIVE_TRIGGERS (JSON-список).
+PROACTIVE_TRIGGERS = [
+    {'type': 'process', 'name': 'code',
+     'title': 'VS Code открыт',
+     'text': 'Могу продолжить работу над проектом.'},
+    {'type': 'process', 'name': 'firefox',
+     'title': 'Браузер открыт',
+     'text': 'Могу найти нужную страницу, если скажете.'},
+]
+
+
+def _load_proactive_triggers():
+    """Триггеры из окружения (JSON), если заданы; иначе значения по умолчанию."""
+    raw = os.environ.get('JARVIS_PROACTIVE_TRIGGERS', '').strip()
+    if not raw:
+        return PROACTIVE_TRIGGERS
+    try:
+        import json
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and parsed:
+            return parsed
+    except ValueError:
+        pass
+    return PROACTIVE_TRIGGERS
+
+
+PROACTIVE_TRIGGERS = _load_proactive_triggers()

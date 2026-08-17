@@ -216,11 +216,22 @@ class _Service:
         self._main_loop.quit()
 
 
-def run_dbus_service(assistant, policy, engine=None):
-    """Запускает главный цикл GLib (блокирующий)."""
+def run_dbus_service(assistant, policy, engine=None, scheduler=None):
+    """Запускает главный цикл GLib (блокирующий).
+
+    scheduler — проактивный планировщик (jarvis/proactive): запускается
+    перед циклом и корректно останавливается при выходе (KeyboardInterrupt
+    или SIGTERM — обрабатываются в GLib-цикле).
+    """
     service = _Service(assistant, engine=engine)
     service._main_loop = GLib.MainLoop()
     try:
+        GLib.unix_signal_add(GLib.PRIORITY_DEFAULT, 15,
+                             service._main_loop.quit)  # SIGTERM
+        if scheduler is not None:
+            scheduler.start()
         service._main_loop.run()
-    except KeyboardInterrupt:
+    finally:
+        if scheduler is not None:
+            scheduler.stop()
         service._main_loop.quit()

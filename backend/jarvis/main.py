@@ -145,7 +145,14 @@ def run_daemon(args):
     print(f'Jarvis daemon: политика {policy.source}, '
           f'облако {"вкл" if assistant.cloud else "выкл"}, '
           f'голос {"вкл" if engine is not None else "выкл"}')
-    run_dbus_service(assistant, policy, engine=engine)
+
+    from jarvis.proactive.scheduler import ProactiveScheduler
+    scheduler = ProactiveScheduler()
+    print(f'[daemon] проактивный планировщик запущен '
+          f'({len(scheduler.pending())} активных напоминаний, '
+          f'{len(config.PROACTIVE_TRIGGERS)} триггеров)')
+
+    run_dbus_service(assistant, policy, engine=engine, scheduler=scheduler)
 
 
 # ============================== MAIN =======================================
