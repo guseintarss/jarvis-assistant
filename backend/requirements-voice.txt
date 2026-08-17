@@ -3,6 +3,7 @@
 # (faster-whisper), синтез (edge-tts / rhvoice-wrapper / piper-tts).
 
 vosk>=0.3.45            # слово-активатор «Ева» (нужна модель из install.sh)
+onnxruntime>=1.17       # инференс обученной WakeNet (детектор «Ева»)
 sounddevice>=0.5.0      # захват микрофона (нужен системный portaudio)
 faster-whisper>=1.0.0   # распознавание команд (модель small, int8)
 edge-tts>=6.0           # онлайн-голос «Светлана» (нужен интернет)

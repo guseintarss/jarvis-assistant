@@ -30,7 +30,11 @@ import random
 from pathlib import Path
 
 import numpy as np
-import torch
+
+try:
+    import torch
+except ImportError:
+    torch = None  # сборка окон работает без torch; обучение — нет
 
 from .features import (SAMPLE_RATE, WIN_SAMPLES, load_wav, noise_at_rms,
                        resample_linear, rms, scale_to_rms)
@@ -59,13 +63,41 @@ def _load_words(files: list[Path], rng: np.random.Generator
     return out
 
 
+def _trim_silence(x: np.ndarray, margin: int = 800) -> np.ndarray:
+    """Обрезка тишины по краям. Реальные записи длиной 1.5 с содержат
+    слово 0.3-0.5 с: без обрезки слово не помещается в окно 1.0 с, и
+    позитив превращается в «тихий пол» (модель учит пол, а не слово)."""
+    w = 320  # 20 мс кадр
+    n_frames = len(x) // w
+    if n_frames < 2:
+        return x
+    frames = x[:n_frames * w].reshape(-1, w)
+    r = np.sqrt((frames ** 2).mean(axis=1))
+    th = max(float(r.max()) * 0.02, 0.002)
+    idx = np.flatnonzero(r > th)
+    if len(idx) == 0:
+        return x
+    lo = max(0, int(idx[0]) * w - margin)
+    hi = min(len(x), (int(idx[-1]) + 1) * w + margin)
+    out = x[lo:hi]
+    if len(out) >= WIN_SAMPLES:
+        # Фон в записи не даёт отрезать «тишину» (микрофон с AGC) —
+        # вырезаем 0.6 с вокруг пика энергии (слово — самая громкая часть).
+        p = int(np.argmax(r))
+        lo = max(0, p * w - 2400)   # 0.15 с до пика
+        hi = min(len(x), p * w + 7200)  # 0.45 с после пика
+        out = x[lo:hi]
+    return out
+
+
 def _place_word(word: np.ndarray, floor: np.ndarray,
                 rng: np.random.Generator) -> np.ndarray:
     """Слово в случайной позиции поверх шума-пола."""
     win = floor.copy()
+    word = _trim_silence(word)
+    if len(word) >= WIN_SAMPLES:
+        word = word[:WIN_SAMPLES]  # крайний случай — обрезаем
     max_start = WIN_SAMPLES - len(word) - 1
-    if max_start <= 0:
-        return win
     start = int((rng.uniform(*POS_SHIFT_RANGE)) * WIN_SAMPLES)
     start = min(start, max_start)
     win[start:start + len(word)] += word
@@ -134,17 +166,28 @@ def build_windows(pos_wavs: list[Path], neg_wavs: list[Path],
     # Негатив: случайное слово/шум заполняет окно целиком (loop/обрезание)
     # confusable («Дева», «Лева»...) и РЕАЛЬНЫЕ записи — hard negatives,
     # им нужно больше окон, иначе крошечная сеть сольёт их с «Ева»
-    neg_flags = [("conf" in p.name, "mine" in p.name)
+    neg_flags = [("conf" in p.name, "mine" in p.name,
+                  "noise" in p.parent.name)
                  for p in neg_wavs]  # до загрузки wav
-    for (is_conf, is_mine), w in zip(neg_flags, neg):
+    for (is_conf, is_mine, is_noise), w in zip(neg_flags, neg):
         mult = 3 if is_conf else (2 if is_mine else 1)
         for _ in range(windows_per_neg * mult):
-            if len(w) < WIN_SAMPLES:
-                reps = int(np.ceil(WIN_SAMPLES / len(w)))
-                win = np.tile(w, reps)[:WIN_SAMPLES]
+            if is_noise:
+                # Шум без слова: окно целиком (loop/обрезание)
+                if len(w) < WIN_SAMPLES:
+                    reps = int(np.ceil(WIN_SAMPLES / len(w)))
+                    win = np.tile(w, reps)[:WIN_SAMPLES]
+                else:
+                    start = rng.integers(0, len(w) - WIN_SAMPLES + 1)
+                    win = w[start:start + WIN_SAMPLES]
             else:
-                start = rng.integers(0, len(w) - WIN_SAMPLES + 1)
-                win = w[start:start + WIN_SAMPLES]
+                # Трудный негатив: слово кладётся ТАК ЖЕ, как позитив —
+                # случайная позиция на полу. Иначе модель учит «одно слово =
+                # Ева, повтор/сплошная речь = не-Ева» и в живом потоке
+                # палит любую речь.
+                db = rng.uniform(*FLOOR_DB_RANGE)
+                floor = _make_floor(rng, room_noise, rms(w) * 10 ** (db / 20.0))
+                win = _place_word(w, floor, rng)
             X.append(win)
             y.append(0)
 
@@ -207,25 +250,33 @@ class Augmenter:
 # PyTorch Dataset: аудио -> признаки (1, 40, 97) -> тензор
 # ---------------------------------------------------------------------------
 
-class WakeDataset(torch.utils.data.Dataset):
-    def __init__(self, X: np.ndarray, y: np.ndarray, extractor,
-                 augment: bool = True, seed: int = 0):
-        self.X, self.y = X, y
-        self.extractor = extractor
-        self.augmenter = Augmenter() if augment else None
-        self._rng = np.random.default_rng(seed)
-        self._rng_aug = np.random.default_rng(seed + 1)
+if torch is not None:
 
-    def __len__(self) -> int:
-        return len(self.y)
+    class WakeDataset(torch.utils.data.Dataset):
+        def __init__(self, X: np.ndarray, y: np.ndarray, extractor,
+                     augment: bool = True, seed: int = 0):
+            self.X, self.y = X, y
+            self.extractor = extractor
+            self.augmenter = Augmenter() if augment else None
+            self._rng = np.random.default_rng(seed)
+            self._rng_aug = np.random.default_rng(seed + 1)
 
-    def __getitem__(self, i: int):
-        x = self.X[i]
-        if self.augmenter is not None:
-            x = self.augmenter(x, self._rng_aug)
-        f = self.extractor.transform(x)          # (40, 97) нормированные
-        t = torch.from_numpy(f).unsqueeze(0)     # (1, 40, 97)
-        return t, torch.tensor(self.y[i], dtype=torch.float32)
+        def __len__(self) -> int:
+            return len(self.y)
+
+        def __getitem__(self, i: int):
+            x = self.X[i]
+            if self.augmenter is not None:
+                x = self.augmenter(x, self._rng_aug)
+            f = self.extractor.transform(x)          # (40, 97) нормированные
+            t = torch.from_numpy(f).unsqueeze(0)     # (1, 40, 97)
+            return t, torch.tensor(self.y[i], dtype=torch.float32)
+else:
+
+    class WakeDataset:  # заглушка без torch (для инференса/тестов)
+        def __init__(self, *args, **kwargs):
+            raise ImportError('torch не установлен: обучение wakeword '
+                              'недоступно (инференс через ONNX работает)')
 
 
 def split_stratified(X: np.ndarray, y: np.ndarray, val_frac: float = 0.2,

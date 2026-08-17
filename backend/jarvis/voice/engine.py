@@ -126,6 +126,18 @@ class VoiceEngine:
         self.on_response = None   # on_response(text: str)
         self.process_fn = None    # process_fn(text) -> dict  (пайплайн)
 
+        # Нейросетевой детектор «Ева» (обученная WakeNet). Если модель
+        # недоступна — available=False и работает прежний Vosk-матчинг.
+        self.wake_nn = None
+        try:
+            from jarvis.voice.wakeword_nn import WakeWordNN
+            self.wake_nn = WakeWordNN()
+            if self.wake_nn.available:
+                print('[wake] нейросетевой детектор «Ева» активен '
+                      f'(порог P>{self.wake_nn.threshold:.2f})')
+        except Exception as exc:  # noqa: BLE001
+            print(f'[wake] NN-детектор недоступен ({exc}), использую Vosk')
+
     # --------------------------- публичный API -----------------------------
 
     @property
@@ -338,6 +350,14 @@ class VoiceEngine:
             try:
                 chunk = audio.audio_queue.get(timeout=0.5)
             except queue.Empty:
+                continue
+
+            if self.wake_nn is not None and self.wake_nn.available:
+                # Нейросетевой детектор: модель смотрит скользящее окно
+                # микрофона вместо текстового матчинга Vosk.
+                if self.wake_nn.feed(chunk):
+                    recognizer.Reset()
+                    return True
                 continue
 
             if recognizer.AcceptWaveform(chunk):

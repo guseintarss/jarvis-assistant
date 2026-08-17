@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis — панель</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header>
+  <h1>Jarvis</h1>
+  <nav>
+    <button data-tab="chat" class="active">Чат</button>
+    <button data-tab="reminders">Напоминания</button>
+    <button data-tab="settings">Настройки</button>
+    <button data-tab="logs">Логи</button>
+    <button data-tab="status">Статус</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ЧАТ -->
+  <section id="tab-chat" class="tab active">
+    <div id="messages" class="messages"></div>
+    <form id="chat-form">
+      <input id="chat-input" type="text" autocomplete="off"
+             placeholder="Спросите Jarvis…" autofocus>
+      <button type="submit">Отправить</button>
+    </form>
+  </section>
+
+  <!-- НАПОМИНАНИЯ -->
+  <section id="tab-reminders" class="tab">
+    <form id="reminder-form" class="row">
+      <input id="reminder-when" type="datetime-local" required>
+      <input id="reminder-text" type="text" placeholder="Что напомнить…" required>
+      <button type="submit">Добавить</button>
+    </form>
+    <ul id="reminder-list"></ul>
+  </section>
+
+  <!-- НАСТРОЙКИ -->
+  <section id="tab-settings" class="tab">
+    <p class="muted">Инструменты: включение и риск (применяются сразу
+      и сохраняются в policy.yaml).</p>
+    <table id="tools-table">
+      <thead><tr><th>Инструмент</th><th>Описание</th><th>Включён</th>
+        <th>Риск</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <!-- ЛОГИ -->
+  <section id="tab-logs" class="tab">
+    <div class="row">
+      <input id="log-lines" type="number" value="100" min="1" max="500">
+      <button id="log-refresh">Обновить</button>
+    </div>
+    <pre id="log-output" class="log"></pre>
+  </section>
+
+  <!-- СТАТУС -->
+  <section id="tab-status" class="tab">
+    <pre id="status-output" class="log"></pre>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

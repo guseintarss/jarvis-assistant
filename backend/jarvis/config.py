@@ -65,6 +65,21 @@ CLOUD_API_KEY = os.environ.get('OPENAI_API_KEY', '').strip()
 CLOUD_TIMEOUT_SEC = 90
 CLOUD_RETRIES = 2
 CLOUD_RETRY_DELAY_SEC = 2.0
+
+# ВСЕ бесплатные модели шлюза opencode.ai/zen (снимаются по /v1/models):
+# цепочка облака пробует их по очереди, пока одна не ответит. Порядок —
+# по предпочтению (первая — самая быстрая). Можно переопределить
+# OPENCODE_FREE_MODELS='м1,м2,...' (пусто — остаётся одна CLOUD_MODEL).
+OPENCODE_FREE_MODELS = [
+    m.strip() for m in os.environ.get(
+        'OPENCODE_FREE_MODELS',
+        'deepseek-v4-flash-free,'
+        'mimo-v2.5-free,'
+        'hy3-free,'
+        'nemotron-3-ultra-free,'
+        'nemotron-3.5-lightning-free,'
+        'laguna-s-2.1-free').split(',') if m.strip()
+]
 CLOUD_MAX_TOKENS = 1500
 
 # ============================== ЦЕПОЧКА ПРОВАЙДЕРОВ (ЧАСТЬ 5) ================
@@ -98,6 +113,16 @@ RATE_LIMIT_PER_MINUTE = int(os.environ.get('JARVIS_RATE_LIMIT_PER_MINUTE', '12')
 RATE_LIMIT_COOLDOWN_SEC = int(os.environ.get('JARVIS_RATE_COOLDOWN_SEC', '60'))
 RATE_LIMIT_COOLDOWN_FAILURES = 2
 
+# ============================== ВЕБ-ИНТЕРФЕЙС (ЧАСТЬ 6) ======================
+# Панель слушает ТОЛЬКО localhost. JARVIS_WEB_TOKEN — опциональный токен:
+# если задан, все запросы должны нести заголовок Authorization: Bearer <token>
+# (защита от других локальных процессов в браузере).
+
+WEB_HOST = os.environ.get('JARVIS_WEB_HOST', '127.0.0.1')
+WEB_PORT = int(os.environ.get('JARVIS_WEB_PORT', '8747'))
+WEB_TOKEN = os.environ.get('JARVIS_WEB_TOKEN', '').strip()
+WEB_LOG_LINES_MAX = 500  # максимум строк лога за один запрос
+
 # ============================== ГОЛОС ======================================
 # Голосовой режим демона (слово-активатор «Ева» -> STT -> пайплайн -> TTS).
 # Все компоненты опциональны: если нет моделей/микрофона, демон работает
@@ -121,6 +146,13 @@ ACTIVATION_MODE = 'voice'    # voice / hotkey / both (меняется по D-Bu
 WAKE_WORDS = ('ева', 'эва')  # слово-активатор
 
 VOSK_MODEL_PATH = os.path.join(DATA_DIR, 'models', 'vosk-model-small-ru')
+
+# Нейросетевой детектор «Ева» (WakeNet ONNX int8, обученная модель):
+# работает вместо текстового матчинга Vosk в цикле ожидания. Если
+# модели/пакета нет — движок автоматически возвращается к Vosk.
+WAKE_MODEL_PATH = os.path.join(DATA_DIR, 'checkpoints', 'wakeword.onnx')
+WAKE_STATS_PATH = os.path.join(DATA_DIR, 'checkpoints', 'stats.npz')
+WAKE_NN_THRESHOLD = 0.95   # P(«Ева»); +2 подряд окна — temporal smoothing
 
 # faster-whisper (STT): грузится лениво при первой команде
 WHISPER_MODEL_SIZE = 'small'       # tiny/base/small/medium

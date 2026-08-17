@@ -124,6 +124,28 @@ class Policy:
 
     # ------------------------- прочее ----------------------------------------
 
+    def set_tool(self, name, enabled=None, risk=None):
+        """Обновляет настройку инструмента в памяти (для веб-настроек).
+
+        Работает на живом объекте политики: включение/выключение и риск
+        применяются сразу. Возвращает True при успехе.
+        """
+        if enabled is not None and not isinstance(enabled, bool):
+            return False
+        if risk is not None and risk not in (intents.RISK_LOW,
+                                             intents.RISK_MEDIUM,
+                                             intents.RISK_HIGH):
+            return False
+        spec = dict(self._tools.get(name) or {})
+        if enabled is not None:
+            spec['enabled'] = enabled
+        if risk is not None:
+            spec['risk'] = risk
+        if not spec:
+            return False
+        self._tools[name] = spec
+        return True
+
     @classmethod
     def load(cls, path):
         """Загружает политику из YAML. При ошибке — defaults + отключение

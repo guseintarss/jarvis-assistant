@@ -155,6 +155,33 @@ def run_daemon(args):
     run_dbus_service(assistant, policy, engine=engine, scheduler=scheduler)
 
 
+# ============================== ВЕБ-ПАНЕЛЬ ==================================
+
+
+def run_web(args):
+    """Веб-панель (FastAPI, localhost): чат, напоминания, настройки, логи.
+
+    Опасные действия подтверждаются так же, как в текстовом режиме без
+    голоса: Confirmator без интерактивного промпта отклоняет их с
+    объяснением. Планировщик напоминаний запускается вместе с панелью.
+    """
+    from jarvis.pipeline import make_assistant
+    from jarvis.proactive.scheduler import ProactiveScheduler
+    from jarvis.web.app import create_app
+
+    policy = load_policy()
+    assistant = make_assistant(policy, prompt_fn=_cli_confirm,
+                               auto_yes=False)
+    scheduler = ProactiveScheduler()
+    app = create_app(assistant, policy, scheduler=scheduler)
+
+    import uvicorn
+    print(f'Jarvis web: http://{config.WEB_HOST}:{config.WEB_PORT} '
+          f'(токен {"вкл" if config.WEB_TOKEN else "выкл"})')
+    uvicorn.run(app, host=config.WEB_HOST, port=config.WEB_PORT,
+                log_level='warning')
+
+
 # ============================== MAIN =======================================
 
 
@@ -168,6 +195,7 @@ def main(argv=None):
     p_cli.add_argument('command', nargs='?', help='разовый запрос')
 
     sub.add_parser('daemon', help='D-Bus демон для расширения GNOME')
+    sub.add_parser('web', help='веб-панель (FastAPI, localhost)')
     sub.add_parser('index', help='пересобрать индекс файлов (FTS5)')
     sub.add_parser('train', help='переобучить локальную модель')
     sub.add_parser('status', help='проверить окружение и политику')
@@ -180,6 +208,8 @@ def main(argv=None):
 
     if mode == 'daemon':
         return run_daemon(args)
+    if mode == 'web':
+        return run_web(args)
     if mode == 'index':
         _run_index()
         return 0
