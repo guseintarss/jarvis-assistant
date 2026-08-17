@@ -34,7 +34,7 @@ def relu_grad(x):
 class MLP:
     """Двухскрытый перцептрон с Adam и ранней остановкой."""
 
-    def __init__(self, input_dim, hidden_sizes=(128, 64), num_classes=15,
+    def __init__(self, input_dim, hidden_sizes=(256, 128), num_classes=15,
                  seed=SEED):
         rng = np.random.default_rng(seed)
         self.dims = [input_dim, *hidden_sizes, num_classes]

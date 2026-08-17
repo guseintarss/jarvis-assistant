@@ -237,6 +237,144 @@ def screenshot():
     return False, ('Не удалось сделать скриншот: нет gnome-screenshot, grim '
                    'или import, а портал не ответил. На GNOME в первый раз '
                    'появится диалог разрешения скриншотов.')
+# ============================== СИСТЕМНАЯ ИНФОРМАЦИЯ =========================
+# Всё — только стандартная библиотека (без psutil): /proc, os, shutil, socket.
+
+
+def _read_proc(path, default=''):
+    """Читает /proc-файл с запасом на отсутствие/ошибки чтения."""
+    try:
+        with open(path, encoding='utf-8', errors='replace') as f:
+            return f.read().strip()
+    except OSError:
+        return default
+
+
+def system_info():
+    """ОС, ядро, CPU, RAM, аптайм и нагрузка (из /proc, без psutil)."""
+    import platform
+    uname = platform.uname()
+    cpu = os.cpu_count() or 0
+    meminfo = {}
+    for line in _read_proc('/proc/meminfo').splitlines():
+        key, _, val = line.partition(':')
+        meminfo[key.strip()] = val.strip()
+    def _mb(key):
+        try:
+            return int(meminfo.get(key, '0').split()[0]) // 1024
+        except (ValueError, IndexError):
+            return 0
+    mem_total, mem_avail = _mb('MemTotal'), _mb('MemAvailable')
+    uptime_s = float(_read_proc('/proc/uptime', '0').split()[0] or 0)
+    uptime = f'{int(uptime_s // 3600)} ч {int(uptime_s % 3600 // 60)} мин'
+    load = _read_proc('/proc/loadavg').split()[:3]
+    return True, (
+        f'Система: {uname.system} {uname.release} ({uname.machine})\n'
+        f'Хост: {uname.node}\n'
+        f'CPU: {cpu} ядер\n'
+        f'Память: занято {mem_total - mem_avail} МБ из {mem_total} МБ\n'
+        f'Аптайм: {uptime}\n'
+        f'Нагрузка: {" ".join(load)}')
+
+
+def check_disk():
+    """Свободное место на корневом разделе."""
+    usage = shutil.disk_usage('/')
+    free_gb = usage.free / 1024 ** 3
+    total_gb = usage.total / 1024 ** 3
+    pct = usage.used / usage.total * 100 if usage.total else 0
+    return True, (f'На диске свободно {free_gb:.1f} ГБ из {total_gb:.1f} ГБ '
+                  f'(занято {pct:.0f}%).')
+
+
+def check_battery():
+    """Заряд батареи из /sys/class/power_supply (BAT*)."""
+    import glob
+    batteries = sorted(glob.glob('/sys/class/power_supply/BAT*'))
+    if not batteries:
+        return False, ('Батарея не найдена — похоже, это настольный '
+                       'компьютер без АКБ.')
+    lines = []
+    for bat in batteries:
+        capacity = _read_proc(os.path.join(bat, 'capacity'), '').strip()
+        status = _read_proc(os.path.join(bat, 'status'), '').strip()
+        name = os.path.basename(bat)
+        if capacity:
+            lines.append(f'{name}: {capacity}% '
+                         f'({status or "неизвестно"})')
+    if not lines:
+        return False, 'Заряд батареи не читается (нет файла capacity).'
+    return True, 'Батарея:\n' + '\n'.join(lines)
+
+
+def check_network():
+    """Проверка сети: есть ли доступ в интернет + локальные интерфейсы."""
+    import socket
+    reachable = False
+    for host, port in (('1.1.1.1', 53), ('8.8.8.8', 53)):
+        try:
+            socket.create_connection((host, port), timeout=2).close()
+            reachable = True
+            break
+        except OSError:
+            continue
+    try:
+        ifaces = [name for name, _ in socket.if_nameindex()]
+    except OSError:
+        ifaces = []
+    if reachable:
+        return True, ('Интернет есть. Сетевые интерфейсы: '
+                      + ', '.join(ifaces) if ifaces else '')
+    return False, ('Сети нет: не удалось достучаться ни до одного хоста. '
+                   'Интерфейсы: ' + ', '.join(ifaces) if ifaces else 'Сети нет.')
+
+
+def list_processes(n=None):
+    """Топ процессов по памяти (/proc/*/stat + status)."""
+    try:
+        top = int(n or 10)
+        top = max(1, min(50, top))
+    except (TypeError, ValueError):
+        top = 10
+    procs = []
+    for pid_dir in os.listdir('/proc'):
+        if not pid_dir.isdigit():
+            continue
+        pid = pid_dir
+        stat = _read_proc(f'/proc/{pid}/stat', '')
+        rss_kb = 0
+        if stat:
+            try:
+                parts = stat.rsplit(')', 1)
+                rss_kb = int(parts[1].split()[21]) * 4096 // 1024
+            except (IndexError, ValueError):
+                rss_kb = 0
+        comm = _read_proc(f'/proc/{pid}/comm', '?').strip()[:30]
+        procs.append((rss_kb, pid, comm))
+    procs.sort(reverse=True)
+    lines = [f'{pid}: {comm} ({rss} МБ)'
+             for rss, pid, comm in procs[:top]]
+    return True, 'Топ процессов по памяти:\n' + '\n'.join(lines)
+
+
+def kill_process(pid=None):
+    """Завершает процесс по PID (SIGTERM). Высокий риск — подтверждение
+    запрашивает Executor (policy). Свой собственный PID — не трогаем."""
+    try:
+        target = int(pid or '')
+    except (TypeError, ValueError):
+        return False, 'Скажите PID процесса числом (например, «убей процесс 1234»).'
+    if target <= 1 or target > 4194304:
+        return False, f'PID {target} вне допустимого диапазона.'
+    if target == os.getpid():
+        return False, 'Я не могу убить сам себя.'
+    try:
+        os.kill(target, 15)  # SIGTERM — вежливый вариант завершения
+    except ProcessLookupError:
+        return False, f'Процесс {target} не существует.'
+    except PermissionError:
+        return False, f'Нет прав на завершение процесса {target}.'
+    return True, f'Отправил сигнал завершения процессу {target}.'
 
 
 # ============================== РЕЕСТР-ХУК ==================================
@@ -250,4 +388,10 @@ TOOLS = {
     'media_play_pause': media_play_pause,
     'lock_screen': lock_screen,
     'screenshot': screenshot,
+    'system_info': system_info,
+    'check_disk': check_disk,
+    'check_battery': check_battery,
+    'check_network': check_network,
+    'list_processes': list_processes,
+    'kill_process': kill_process,
 }

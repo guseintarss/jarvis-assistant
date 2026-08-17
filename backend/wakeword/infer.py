@@ -155,7 +155,9 @@ def live_loop(model: WakeModel, device, threshold: float,
         if status:
             print(f"    [status] {status}", file=sys.stderr)
         try:
-            q.put_nowait(indata.copy())
+            # RawInputStream даёт cffi-buffer (не numpy!): frombuffer + copy
+            block = np.frombuffer(indata, dtype=np.int16).copy()
+            q.put_nowait(block)
         except queue.Full:
             pass  # переполнение: главный цикл не успевает — пропускаем
 

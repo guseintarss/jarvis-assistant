@@ -38,6 +38,9 @@ MODEL_PATH = os.path.join(DATA_DIR, 'models', 'intent_mlp.npz')
 # База SQLite FTS5 для индекса файлов
 INDEX_DB_PATH = os.path.join(DATA_DIR, 'index.db')
 
+# База памяти ассистента: реплики диалога, факты, история действий
+MEMORY_DB_PATH = os.path.join(DATA_DIR, 'memory.db')
+
 # Каталог JSONL-логов (значение по умолчанию; policy.yaml может переопределить)
 LOG_DIR = os.path.expanduser(
     os.environ.get('JARVIS_LOG_DIR', '~/.local/share/jarvis-assistant/logs'))
@@ -132,3 +135,48 @@ INDEX_MAX_FILE_BYTES = 10 * 1024 * 1024
 
 # Таймауты инструментов (сек)
 TOOL_TIMEOUT_SEC = 15
+
+# ============================== НОВЫЕ ИНТЕНТЫ (ЧАСТЬ 2) ====================
+# Таймеры/будильники ставятся через systemd-run (переживают перезапуск
+# демона); напоминания хранятся в своей БД — их разбирает планировщик
+# (jarvis/proactive/scheduler.py, ЧАСТЬ 3) каждую секунду.
+
+REMINDERS_DB_PATH = os.path.join(DATA_DIR, 'reminders.db')
+
+# История буфера обмена (своя: xclip не хранит историю)
+CLIPBOARD_HISTORY_DB_PATH = os.path.join(DATA_DIR, 'clipboard.db')
+
+# Офлайн-кэш курсов валют (обновляется раз в сутки; при отсутствии сети
+# используется последний сохранённый курс)
+CURRENCY_CACHE_PATH = os.path.join(DATA_DIR, 'currency.json')
+CURRENCY_CACHE_MAX_AGE_SEC = 24 * 3600
+CURRENCY_API_URL = 'https://open.er-api.com/v6/latest/USD'
+CURRENCY_API_TIMEOUT_SEC = 8
+
+# Календарь: локальный .ics (кэш курсов/новостей — в памяти процесса)
+CALENDAR_ICS_PATH = os.path.expanduser(
+    os.environ.get('JARVIS_CALENDAR_ICS', os.path.join(DATA_DIR, 'calendar.ics')))
+
+# Почта (send_email): все настройки — из окружения, секретов в коде нет.
+# JARVIS_SMTP_TO — адрес получателя по умолчанию.
+SMTP_HOST = os.environ.get('JARVIS_SMTP_HOST', '')
+SMTP_PORT = int(os.environ.get('JARVIS_SMTP_PORT', '465'))
+SMTP_USER = os.environ.get('JARVIS_SMTP_USER', '')
+SMTP_PASSWORD = os.environ.get('JARVIS_SMTP_PASSWORD', '')
+SMTP_DEFAULT_TO = os.environ.get('JARVIS_SMTP_TO', '')
+
+# Перевод текста: бесплатный API без ключа (MyMemory). Секретов не требует.
+TRANSLATE_API_URL = ('https://api.mymemory.translated.net/get'
+                     '?q={query}&langpair={src}|{dst}')
+TRANSLATE_API_TIMEOUT_SEC = 10
+
+# Погода: wttr.in без ключа
+WEATHER_API_URL = 'https://wttr.in/{city}?format=%C+%t+%w&lang=ru'
+WEATHER_API_TIMEOUT_SEC = 8
+
+# RSS-новости: проверяются по очереди до первого успеха
+NEWS_FEEDS = [
+    'https://lenta.ru/rss/',
+    'https://www.securitylab.ru/_services/export/rss/',
+]
+NEWS_MAX_ITEMS = 5

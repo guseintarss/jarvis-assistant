@@ -14,6 +14,11 @@ import json
 import os
 import re
 
+
+def datetime_now():
+    """Текущее время в ISO-формате (для JSONL-записей и БД памяти)."""
+    return datetime.datetime.now().astimezone().isoformat()
+
 # Паттерны секретов в произвольных строках (значение после имени ключа)
 _SECRET_VALUE_RE = re.compile(
     r"(?i)(api[_-]?key|apikey|secret|token|password|passwd|authorization|bearer)"

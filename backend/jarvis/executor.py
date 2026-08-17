@@ -21,12 +21,22 @@ from jarvis.security import check_params
 class Executor:
     """Исполнитель намерений и планов."""
 
-    def __init__(self, policy, registry, guard, confirmator, log=None):
+    def __init__(self, policy, registry, guard, confirmator, log=None,
+                 memory=None):
         self.policy = policy
         self.registry = registry
         self.guard = guard
         self.confirmator = confirmator
+        self.memory = memory
         self.log = log or logger.get_logger()
+
+    def _remember_action(self, tool, params, ok, message):
+        """Сохраняет выполненное действие в историю (для undo)."""
+        if self.memory is not None and getattr(self.memory, 'enabled', False):
+            try:
+                self.memory.actions.push(tool, params, ok=ok, message=message)
+            except Exception:  # noqa: BLE001 — история не должна ломать выполнение
+                pass
 
     # --------------------------- намерения ---------------------------------
 
@@ -65,6 +75,7 @@ class Executor:
                                                guard=self.guard)
         self.log.event('executed', intent=intent_name, risk=risk,
                        ok=ok, message=message)
+        self._remember_action(intent_name, clean_slots, ok, message)
         return ok, message, data
 
     # --------------------------- планы -------------------------------------
@@ -103,6 +114,7 @@ class Executor:
             self.log.event('executed', intent=tool, risk=risk,
                            source='cloud_plan', ok=ok, message=message,
                            params=params)
+            self._remember_action(tool, clean_params, ok, message)
             results.append({'tool': tool, 'ok': ok, 'message': message})
             if not ok:
                 return False, f'Шаг «{tool}» не выполнен: {message}', results
@@ -120,4 +132,5 @@ class Executor:
         self.log.event('sandbox_start', code_chars=len(params.get('content', '')))
         ok, message = bwrap.run_code(params.get('content', ''), self.policy)
         self.log.event('sandbox_done', ok=ok, message=message)
+        self._remember_action('run_code', {}, ok, message)
         return ok, message

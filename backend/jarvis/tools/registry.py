@@ -14,10 +14,16 @@ import inspect
 
 from jarvis import intents
 from jarvis.security import check_params
+from jarvis.tools import calc
+from jarvis.tools import clipboard
 from jarvis.tools import desktop
 from jarvis.tools import files
 from jarvis.tools import search
+from jarvis.tools import services
 from jarvis.tools import system
+from jarvis.tools import text
+from jarvis.tools import time as time_tools
+from jarvis.tools import windows
 
 
 class ToolSpec:
@@ -118,6 +124,122 @@ class Registry:
         add('move_to_trash', ToolSpec(
             'move_to_trash', 'переместить файл(ы) в корзину (восстановимо)',
             {'paths': 'list[str]'}, files.move_to_trash))
+
+        # ------------------------ время (ЧАСТЬ 2) ---------------------------
+        add('set_timer', ToolSpec(
+            'set_timer', 'установить таймер на N (systemd-run + уведомление)',
+            {'duration': 'str'}, time_tools.set_timer))
+        add('set_alarm', ToolSpec(
+            'set_alarm', 'установить будильник на HH:MM (systemd-run)',
+            {'time': 'str(optional)', 'hour': 'str(optional)'},
+            time_tools.set_alarm))
+        add('set_reminder', ToolSpec(
+            'set_reminder', 'напоминание на дату/время (SQLite)',
+            {'time': 'str(optional)', 'day': 'str(optional)', 'text': 'str'},
+            time_tools.set_reminder))
+        add('check_time', ToolSpec(
+            'check_time', 'текущее локальное время', {},
+            time_tools.check_time))
+        add('check_date', ToolSpec(
+            'check_date', 'сегодняшняя дата и день недели', {},
+            time_tools.check_date))
+        add('list_reminders', ToolSpec(
+            'list_reminders', 'список активных напоминаний', {},
+            time_tools.list_reminders))
+        add('cancel_reminder', ToolSpec(
+            'cancel_reminder', 'отменить напоминание по id/«последнее»/«все»',
+            {'target': 'str(optional)'}, time_tools.cancel_reminder))
+
+        # ------------------------ окна (ЧАСТЬ 2) ----------------------------
+        add('minimize_window', ToolSpec(
+            'minimize_window', 'свернуть окно приложения (wmctrl)',
+            {'window': 'str'}, windows.minimize_window))
+        add('maximize_window', ToolSpec(
+            'maximize_window', 'развернуть окно приложения (wmctrl)',
+            {'window': 'str'}, windows.maximize_window))
+        add('close_window', ToolSpec(
+            'close_window', 'закрыть окно приложения (wmctrl)',
+            {'window': 'str'}, windows.close_window))
+        add('list_windows', ToolSpec(
+            'list_windows', 'список открытых окон (wmctrl -l)', {},
+            windows.list_windows))
+        add('switch_window', ToolSpec(
+            'switch_window', 'переключиться на окно приложения (wmctrl)',
+            {'window': 'str'}, windows.switch_window))
+        add('switch_workspace', ToolSpec(
+            'switch_workspace', 'переключить рабочий стол (wmctrl -s)',
+            {'number': 'str(optional)'}, windows.switch_workspace))
+
+        # ------------------------ текст (ЧАСТЬ 2) ---------------------------
+        add('count_words', ToolSpec(
+            'count_words', 'посчитать слова в тексте',
+            {'text': 'str'}, text.count_words))
+        add('change_case', ToolSpec(
+            'change_case', 'сменить регистр текста (верхний/нижний)',
+            {'case': 'str(optional)', 'text': 'str'}, text.change_case))
+        add('translate_text', ToolSpec(
+            'translate_text', 'перевести текст на язык (бесплатный API)',
+            {'lang': 'str(optional)', 'text': 'str'}, text.translate_text))
+
+        # ------------------------ система (ЧАСТЬ 2) -------------------------
+        add('system_info', ToolSpec(
+            'system_info', 'информация о системе (OS, CPU, RAM, аптайм)',
+            {}, system.system_info))
+        add('check_disk', ToolSpec(
+            'check_disk', 'свободное место на диске', {}, system.check_disk))
+        add('check_battery', ToolSpec(
+            'check_battery', 'заряд батареи ноутбука', {},
+            system.check_battery))
+        add('check_network', ToolSpec(
+            'check_network', 'проверка сети и интернета', {},
+            system.check_network))
+        add('list_processes', ToolSpec(
+            'list_processes', 'топ процессов по памяти',
+            {'n': 'str(optional)'}, system.list_processes))
+        add('kill_process', ToolSpec(
+            'kill_process', 'завершить процесс по PID (SIGTERM)',
+            {'pid': 'str'}, system.kill_process))
+
+        # ------------------------ калькулятор (ЧАСТЬ 2) ---------------------
+        add('calculate', ToolSpec(
+            'calculate', 'математические вычисления (безопасный парсер)',
+            {'expression': 'str'}, calc.calculate))
+        add('convert_currency', ToolSpec(
+            'convert_currency', 'конвертация валют (кэш + API)',
+            {'amount': 'str', 'from': 'str', 'to': 'str'},
+            lambda **kw: calc.convert_currency(
+                amount=kw.get('amount'), from_=kw.get('from'),
+                to_=kw.get('to'))))
+        add('convert_units', ToolSpec(
+            'convert_units', 'конвертация единиц измерения',
+            {'amount': 'str', 'from': 'str', 'to': 'str'},
+            lambda **kw: calc.convert_units(
+                amount=kw.get('amount'), from_=kw.get('from'),
+                to_=kw.get('to'))))
+
+        # ------------------------ буфер обмена (ЧАСТЬ 2) --------------------
+        add('clipboard_copy', ToolSpec(
+            'clipboard_copy', 'скопировать текст в буфер обмена',
+            {'text': 'str(optional)'}, clipboard.clipboard_copy))
+        add('clipboard_paste', ToolSpec(
+            'clipboard_paste', 'показать содержимое буфера обмена', {},
+            clipboard.clipboard_paste))
+        add('clipboard_history', ToolSpec(
+            'clipboard_history', 'история копирований в буфер обмена', {},
+            clipboard.clipboard_history))
+
+        # ------------------------ сервисы (ЧАСТЬ 2) -------------------------
+        add('check_weather', ToolSpec(
+            'check_weather', 'погода в городе (wttr.in)',
+            {'city': 'str(optional)'}, services.check_weather))
+        add('check_news', ToolSpec(
+            'check_news', 'свежие новости из RSS', {}, services.check_news))
+        add('send_email', ToolSpec(
+            'send_email', 'отправить письмо по SMTP (подтверждение)',
+            {'to': 'str(optional)', 'text': 'str'}, services.send_email))
+        add('check_calendar', ToolSpec(
+            'check_calendar', 'ближайшие события из локального .ics', {},
+            services.check_calendar))
 
     # ------------------------------ API -----------------------------------
 

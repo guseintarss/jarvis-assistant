@@ -96,6 +96,39 @@ policy:
     lock_screen:     {enabled: true,  risk: low}
     screenshot:      {enabled: true,  risk: medium}
     move_to_trash:   {enabled: true,  risk: high}
+    # --- Новые инструменты (ЧАСТЬ 2) ---
+    set_timer:       {enabled: true,  risk: low}
+    set_alarm:       {enabled: true,  risk: low}
+    set_reminder:    {enabled: true,  risk: low}
+    check_time:      {enabled: true,  risk: low}
+    check_date:      {enabled: true,  risk: low}
+    list_reminders:  {enabled: true,  risk: low}
+    cancel_reminder: {enabled: true,  risk: low}
+    minimize_window: {enabled: true,  risk: low}
+    maximize_window: {enabled: true,  risk: low}
+    close_window:    {enabled: true,  risk: medium}
+    list_windows:    {enabled: true,  risk: low}
+    switch_window:   {enabled: true,  risk: low}
+    switch_workspace: {enabled: true,  risk: low}
+    count_words:     {enabled: true,  risk: low}
+    change_case:     {enabled: true,  risk: low}
+    translate_text:  {enabled: true,  risk: low}
+    system_info:     {enabled: true,  risk: low}
+    check_disk:      {enabled: true,  risk: low}
+    check_battery:   {enabled: true,  risk: low}
+    check_network:   {enabled: true,  risk: low}
+    list_processes:  {enabled: true,  risk: low}
+    kill_process:    {enabled: true,  risk: high}
+    calculate:       {enabled: true,  risk: low}
+    convert_currency: {enabled: true,  risk: low}
+    convert_units:   {enabled: true,  risk: low}
+    clipboard_copy:  {enabled: true,  risk: low}
+    clipboard_paste: {enabled: true,  risk: low}
+    clipboard_history: {enabled: true,  risk: low}
+    check_weather:   {enabled: true,  risk: low}
+    check_news:      {enabled: true,  risk: low}
+    send_email:      {enabled: true,  risk: high}
+    check_calendar:  {enabled: true,  risk: low}
     # run_code — НЕ инструмент в intents.py: он доступен только через
     # облачный план и выполняется исключительно в sandbox (bubblewrap)
     run_code:        {enabled: true,  risk: high}
