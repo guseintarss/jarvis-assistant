@@ -2,7 +2,7 @@
 
 Запуск (из каталога backend/):
     ../.local/share/jarvis-assistant/venv/bin/python -m unittest \
-        tests.test_daemon -v
+        tests.legacy_test_daemon -v
 
 Тесты роутера подменяют моками функции действий (action_*), чтобы не менять
 реальную громкость/яркость/окна и не открывать приложения во время прогона.

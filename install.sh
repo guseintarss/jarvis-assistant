@@ -2,18 +2,25 @@
 set -euo pipefail
 
 # ============================================================
-# Ева — голосовой ассистент. Установщик
+# Jarvis — ассистент. Установщик
 #   Ставит:
 #     - расширение GNOME Shell в ~/.local/share/gnome-shell/extensions
-#     - Python-демон + venv в ~/.local/share/jarvis-assistant
-#     - модель Vosk (слово-активатор) и женский голос Piper "irina" (TTS)
+#     - новый модульный бэкенд (пакет jarvis/) + venv в ~/.local/share/jarvis-assistant
 #     - systemd --user юнит для автозапуска демона
+#   Опционально (--with-voice): Vosk (слово-активатор), Piper/RHVoice (TTS)
+#   для легаси-голосового демона jarvis_daemon.py.
 # ============================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$HOME/.local/share/jarvis-assistant"
 EXT_DIR="$HOME/.local/share/gnome-shell/extensions/jarvis-assistant@local"
 MODELS_DIR="$APP_DIR/models"
+WITH_VOICE=0
+for arg in "$@"; do
+    case "$arg" in
+        --with-voice) WITH_VOICE=1 ;;
+    esac
+done
 
 # ============================================================
 # Скачивание с проверкой целостности (SHA-256).
@@ -123,15 +130,24 @@ else
     echo "   режима активации и горячей клавиши в расширении не будет работать"
 fi
 
-echo "==> Копирую демон..."
-cp "$SCRIPT_DIR"/backend/jarvis_daemon.py "$APP_DIR"/
-cp "$SCRIPT_DIR"/backend/config.py "$APP_DIR"/
+echo "==> Копирую бэкенд (модульный пакет jarvis/)..."
+rm -rf "$APP_DIR/jarvis"
+cp -r "$SCRIPT_DIR"/backend/jarvis "$APP_DIR"/jarvis
+cp "$SCRIPT_DIR"/backend/policy.yaml "$APP_DIR"/
 cp "$SCRIPT_DIR"/backend/requirements.txt "$APP_DIR"/
+cp "$SCRIPT_DIR"/backend/requirements-voice.txt "$APP_DIR"/ 2>/dev/null || true
+# легаси-голосовой демон — на случай, если понадобится старый режим
+cp "$SCRIPT_DIR"/backend/jarvis_daemon.py "$APP_DIR"/ 2>/dev/null || true
+cp "$SCRIPT_DIR"/backend/config.py "$APP_DIR"/ 2>/dev/null || true
 
 echo "==> Создаю виртуальное окружение и ставлю Python-зависимости..."
 python3 -m venv "$APP_DIR/venv"
 "$APP_DIR/venv/bin/pip" install --upgrade pip --no-cache-dir
 "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements.txt" --no-cache-dir
+if [ "$WITH_VOICE" = "1" ]; then
+    echo "==> Голосовой режим: ставлю Vosk/whisper/TTS-модули..."
+    "$APP_DIR/venv/bin/pip" install -r "$APP_DIR/requirements-voice.txt" --no-cache-dir
+fi
 
 echo "==> Даю venv доступ к системному PyGObject (нужен для D-Bus/GLib)..."
 SYS_GI_PATH=$(python3 -c "import gi, os; print(os.path.dirname(os.path.dirname(gi.__file__)))")
@@ -142,6 +158,12 @@ else
     echo "!! Не нашёл системный модуль gi. Установите пакет PyGObject:"
     echo "   Arch: sudo pacman -S python-gobject   |   Debian/Ubuntu: sudo apt install python3-gi"
 fi
+
+echo "==> Обучаю локальную модель намерений (первый запуск — может занять минуту)..."
+JARVIS_DATA_DIR="$APP_DIR" "$APP_DIR/venv/bin/python" -m jarvis.main train 2>/dev/null \
+    || echo "    (модель обучится автоматически при первом запросе демона)"
+
+if [ "$WITH_VOICE" = "1" ]; then
 
 echo "==> Скачиваю Vosk-модель (маленькая, для слова-активатора)..."
 # Контрольная сумма: та же, что в AUR-пакете vosk-model-small-ru
@@ -235,6 +257,8 @@ else
     fi
 fi
 
+fi  # WITH_VOICE
+
 echo "==> Добавляю пользователя в группу 'video' (нужно для управления яркостью через brightnessctl)..."
 if ! groups "$USER" | grep -qw video; then
     sudo usermod -aG video "$USER"
@@ -243,19 +267,11 @@ else
     echo "    уже в группе video"
 fi
 
-echo "==> Проверяю LLM (облачная + локальная Ollama в гонке)..."
-if ! command -v ollama >/dev/null 2>&1; then
-    echo "!! Ollama не найден (нужен для локального участника гонки)."
-    echo "   Установите: curl -fsSL https://ollama.com/install.sh | sh"
-    echo "   и скачайте лёгкую модель: ollama pull qwen2.5:3b-instruct"
-else
-    echo "    Ollama найден. Для слабого ноутбука рекомендую лёгкую модель:"
-    echo "        ollama pull qwen2.5:3b-instruct   (или 1.5b — ещё легче)"
-fi
+echo "==> Проверяю LLM (облачная)..."
 echo "    Облачный режим настроен по умолчанию — БЕСПЛАТНЫЙ"
 echo "    DeepSeek V4 Flash Free через opencode.ai/zen (без ключа)."
-echo "    Для платного провайдера поменяйте в backend/config.py:"
-echo "        OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL"
+echo "    Для платного провайдера поменяйте в backend/jarvis/config.py:"
+echo "        CLOUD_BASE_URL / CLOUD_API_KEY / CLOUD_MODEL"
 
 echo "==> Устанавливаю systemd --user юнит..."
 mkdir -p "$HOME/.config/systemd/user"
@@ -278,20 +294,25 @@ echo "======================================================"
 echo " Установка завершена."
 echo ""
 echo " Дальнейшие шаги:"
-echo "  1. LLM уже настроена: облако DeepSeek V4 Flash Free + локальная"
-echo "     Ollama в гонке (qwen2.5:3b-instruct, если установлена;"
-echo "     else: ollama pull qwen2.5:3b-instruct)"
-echo "  2. Запустите демон:"
+echo "  1. LLM уже настроена: облако DeepSeek V4 Flash Free (opencode.ai/zen)"
+echo "     для сложных запросов; простые команды исполняются локально."
+echo "  2. Проверьте командой:"
+echo "       $APP_DIR/venv/bin/python -m jarvis.main cli 'открой браузер'"
+echo "  3. Запустите демон:"
 echo "       systemctl --user start jarvis-assistant.service"
-echo "  3. Логи демона:"
+echo "  4. Логи демона:"
 echo "       journalctl --user -u jarvis-assistant.service -f"
-echo "  4. На Wayland перелогиньтесь, чтобы расширение подхватилось;"
+echo "  5. На Wayland перелогиньтесь, чтобы расширение подхватилось;"
 echo "     на X11 достаточно Alt+F2 -> r -> Enter."
-echo "  5. Скажите «Ева» и задайте вопрос."
-echo "  6. Режим активации (голос / горячая клавиша / оба) и сама клавиша"
-echo "     настраиваются в меню расширения и в «Настройки → Клавиатура»."
-echo "  7. (опционально) Естественный женский голос RHVoice:"
-echo "       sudo pacman -S rhvoice rhvoice-language-russian rhvoice-voice-elena && systemctl --user restart jarvis-assistant.service"
+if [ "$WITH_VOICE" = "1" ]; then
+    echo "  6. Голосовой режим включён: демон слушает слово-активатор «Ева»"
+    echo "     (Vosk -> faster-whisper -> пайплайн -> TTS). Проверьте:"
+    echo "       journalctl --user -u jarvis-assistant.service -f"
+    echo "     Отключить голос: JARVIS_VOICE=0 в systemd-юните."
+else
+    echo "  6. Голосовой режим (слово-активатор «Ева» + TTS) — по желанию:"
+    echo "       $0 --with-voice"
+fi
 echo ""
 echo " Если после логина не работал рабочий стол (падал GNOME Shell):"
 echo "   systemctl --user disable --now jarvis-assistant.service"

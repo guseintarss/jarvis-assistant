@@ -2302,6 +2302,15 @@ def _compose_cloud_prompt(user_text, local_outcomes):
             'Опирайся на это, не вызывай действия повторно.]')
 
 
+def _may_need_system_action(text):
+    """Быстрый фильтр: может ли запрос требовать системных действий.
+    Маркеры соответствуют описаниям инструментов (SYSTEM_ACTION_TRIGGERS).
+    Если ни одного слова не найдено — локальная модель не вызывается
+    вообще, ответ сразу формирует облако (экономия ~1.5-3 с)."""
+    t = text.lower()
+    return any(k in t for k in SYSTEM_ACTION_TRIGGERS)
+
+
 def execute_local_tools(user_text, chat_messages):
     """Локальная модель — «рабочая»: выполняет инструменты (открыть
     приложение, время, таймер, громкость...), но вслух НЕ отвечает.
@@ -2799,11 +2808,20 @@ def ask_llm_streaming(user_text, chat_messages, holder=None, max_sentences=None)
     недоступном облаке — текст локальной модели (действия она уже
     сделала). holder — необязательный dict: в него пишется flag
     'streamed', как только началась речь (для снятия дедлайна ожидания)."""
-    local_text, local_outcomes = execute_local_tools(user_text, chat_messages)
+    local_text, local_outcomes = '', []
+    if _may_need_system_action(user_text):
+        local_text, local_outcomes = execute_local_tools(user_text, chat_messages)
+    else:
+        _log('[jarvis] системных действий не нужно — сразу облако')
 
     if not _cloud_ok():
         _warn('[cloud] облако отключено (остывание) — '
               'запасной ответ текстом рабочей модели')
+        if not local_text:
+            try:
+                local_text, _ = execute_local_tools(user_text, chat_messages)
+            except Exception:
+                pass
         return (_local_fallback_answer(
             user_text, chat_messages, local_text), False)
 
@@ -2833,6 +2851,11 @@ def ask_llm_streaming(user_text, chat_messages, holder=None, max_sentences=None)
             say=say)
     except Exception as e:
         _err(f'[cloud] стрим-ответ не удался: {e}')
+        if not local_text:
+            try:
+                local_text, _ = execute_local_tools(user_text, chat_messages)
+            except Exception:
+                pass
         return (_local_fallback_answer(
             user_text, chat_messages, local_text), False)
 
@@ -2843,6 +2866,11 @@ def ask_llm_streaming(user_text, chat_messages, holder=None, max_sentences=None)
         # Облако ничего не озвучило (обрыв стрима) — запасной путь: читаем
         # то, что успела выполнить локальная модель.
         _warn('[cloud] стрим пустой — запасной ответ рабочей модели')
+        if not local_text:
+            try:
+                local_text, _ = execute_local_tools(user_text, chat_messages)
+            except Exception:
+                pass
         return (_local_fallback_answer(
             user_text, chat_messages, local_text), False)
 

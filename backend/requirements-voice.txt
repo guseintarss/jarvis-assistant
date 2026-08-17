@@ -1,0 +1,10 @@
+# Голосовой режим jarvis (--with-voice в install.sh):
+# слово-активатор (Vosk), запись (sounddevice), распознавание
+# (faster-whisper), синтез (edge-tts / rhvoice-wrapper / piper-tts).
+
+vosk>=0.3.45            # слово-активатор «Ева» (нужна модель из install.sh)
+sounddevice>=0.5.0      # захват микрофона (нужен системный portaudio)
+faster-whisper>=1.0.0   # распознавание команд (модель small, int8)
+edge-tts>=6.0           # онлайн-голос «Светлана» (нужен интернет)
+rhvoice-wrapper>=0.8.0  # офлайн-голос Elena (нужна libRHVoice + голоса)
+piper-tts>=1.2.0        # офлайн-голос irina (нужна модель из install.sh)

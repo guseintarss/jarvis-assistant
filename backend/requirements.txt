@@ -1,18 +1,11 @@
-vosk>=0.3.45
-sounddevice>=0.4.6
-numpy>=1.24
-faster-whisper>=1.0.0
-requests>=2.31
-piper-tts>=1.2.0
-# Естественный русский женский голос (RHVoice). Нужен системный пакет
-# libRHVoice: sudo pacman -S rhvoice rhvoice-language-russian (или
-# sudo apt install rhvoice rhvoice-language-russian). Без него демон
-# автоматически переключается на Piper (голос irina).
-rhvoice-wrapper>=0.8.0
+# Jarvis — новый модульный бэкенд (текстовый ассистент)
+numpy>=1.26          # локальная модель классификации намерений (NumPy MLP)
+requests>=2.31       # облачная LLM (JSON-план)
+PyYAML>=6.0          # policy.yaml
 
-# D-Bus реализован на системном PyGObject (gi/Gio) — pydbus убран:
-# он несовместим с Python 3.13+ и падает при публикации сервиса.
-#
-# PyGObject (модуль "gi") НЕ ставится через pip — используется системный
-# пакет (python-gobject на Arch / python3-gi на Debian-Ubuntu),
-# install.sh сам пробрасывает его в venv символической ссылкой.
+# D-Bus реализован на системном PyGObject (gi/Gio) — НЕ ставится через pip,
+# используется системный пакет (python-gobject на Arch / python3-gi на
+# Debian/Ubuntu); install.sh сам пробрасывает его в venv символьной ссылкой.
+
+# Голосовой режим (слово-активатор, STT, TTS) — опционально:
+#   pip install -r requirements-voice.txt   (или ./install.sh --with-voice)

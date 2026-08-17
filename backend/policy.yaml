@@ -1,0 +1,125 @@
+# ============================================================================
+# Политика безопасности ассистента Jarvis
+# ============================================================================
+# Единственный источник правды о том, что ассистент может делать.
+# Загружается модулем jarvis/policy.py при каждом запуске.
+#
+# Правила:
+#   • пути задаются с '~' или абсолютные; '~' раскрывается автоматически;
+#   • в denylist_paths нельзя попасть вообще — ни открыть, ни проиндексировать,
+#     ни удалить, ни искать внутри;
+#   • allowed_roots — корни, внутри которых разрешены файловые операции;
+#   • инструменты можно отключать целиком (enabled: false);
+#   • risk у инструмента переопределяет уровень по умолчанию из intents.py;
+#   • подтверждение: high -> always, medium -> никогда (можно поменять).
+
+policy:
+  version: 1
+
+  # --- Доступ к файловой системе -----------------------------------------
+  allowed_roots:
+    - "~"                          # весь домашний каталог...
+  denylist_paths:                  # ...кроме этих (никогда, ни при каких условиях)
+    - "~/.ssh"
+    - "~/.gnupg"
+    - "~/.aws"
+    - "~/.config"
+    - "~/.cache"
+    - "~/.local/share/keyrings"
+    - "~/.local/share/gnupg"
+    - "~/.password-store"
+    - "~/.netrc"
+    - "~/.wget-hsts"
+    - "~/.bash_history"
+    - "~/.zsh_history"
+    - "~/.python_history"
+    - "~/.gitconfig"
+    - "~/.git-credentials"
+    - "~/.npmrc"
+    - "~/.pypirc"
+    - "~/.docker"
+    - "~/.kube"
+    - "~/.vscode-server"
+    - "~/.vscode-remote"
+    - "/etc"
+    - "/usr"
+    - "/boot"
+    - "/proc"
+    - "/sys"
+    - "/dev"
+    - "/run"
+    - "/var"
+    - "/root"
+    - "/srv"
+    - "/opt"
+    - "/mnt"
+    - "/media"                     # съёмные носители — намеренно (данные гостей)
+    - "/tmp"                       # чужие временные файлы других пользователей
+    - "/usr/lib/jvm"
+
+  # --- Индексация файлов ---------------------------------------------------
+  # Папки, которые обходит индексатор (SQLite FTS5). Медиа-папки
+  # индексируются по именам файлов, текстовые — по содержимому.
+  index_roots:
+    - "~/Проекты"
+    - "~/Документы"
+    - "~/Загрузки"
+    - "~/Рабочий стол"
+    - "~/Музыка"
+    - "~/Изображения"
+    - "~/Видео"
+
+  # Расширения, содержимое которых читается в индекс
+  index_extensions: [.txt, .md, .json, .py, .sh, .rst, .yaml, .yml, .toml,
+                     .ini, .conf, .log, .csv, .html, .css, .js, .ts, .c, .h,
+                     .cpp, .hpp, .java, .go, .rs, .sql]
+  index_max_file_mb: 10
+
+  # --- Подтверждение опасных действий --------------------------------------
+  confirmation:
+    high: always                   # всегда спрашивать перед high-риском
+    medium: never                  # medium — проверка путей, без вопроса
+
+  # --- Инструменты ----------------------------------------------------------
+  tools:
+    open_app:        {enabled: true,  risk: low}
+    open_file:       {enabled: true,  risk: medium}
+    open_url:        {enabled: true,  risk: medium}
+    search_files:    {enabled: true,  risk: low}
+    search_text:     {enabled: true,  risk: low}
+    volume_up:       {enabled: true,  risk: low}
+    volume_down:     {enabled: true,  risk: low}
+    brightness_up:   {enabled: true,  risk: low}
+    brightness_down: {enabled: true,  risk: low}
+    notify:          {enabled: true,  risk: low}
+    media_play_pause: {enabled: true,  risk: low}
+    lock_screen:     {enabled: true,  risk: low}
+    screenshot:      {enabled: true,  risk: medium}
+    move_to_trash:   {enabled: true,  risk: high}
+    # run_code — НЕ инструмент в intents.py: он доступен только через
+    # облачный план и выполняется исключительно в sandbox (bubblewrap)
+    run_code:        {enabled: true,  risk: high}
+
+  # --- Sandbox для сгенерированного кода ------------------------------------
+  sandbox:
+    enabled: true
+    require_confirmation: true     # подтверждать запуск кода
+    code_max_chars: 20000
+    time_limit_sec: 30
+    memory_limit_mb: 512
+    network: false                 # сеть отключена всегда (--unshare-net)
+    output_max_bytes: 65536
+
+  # --- Облачная LLM ----------------------------------------------------------
+  cloud:
+    enabled: true                  # дублирует JARVIS_CLOUD_ENABLED
+    max_steps_per_plan: 10         # максимум шагов в одном плане
+    timeout_sec: 90
+    # Поля, которые облачная модель НЕ имеет права возвращать ни на каком
+    # уровне плана (защита от инъекций и «сырых команд»)
+    forbidden_fields: [command, shell, script, exec, subprocess, os_system]
+
+  # --- Логирование -----------------------------------------------------------
+  logging:
+    jsonl: true
+    log_dir: "~/.local/share/jarvis-assistant/logs"

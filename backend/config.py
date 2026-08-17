@@ -227,15 +227,35 @@ LLM_BACKEND = 'openai'          # оставлено для совместимо
 _http = requests.Session()
 
 # Облачный провайдер:
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
-#    БЕСПЛАТНЫЙ DeepSeek V4 Flash Free (opencode.ai/zen — без ключа):
-#        OPENAI_BASE_URL = 'https://opencode.ai/zen/v1'
-#        OPENAI_MODEL = 'deepseek-v4-flash-free'
-#    Платные варианты (впишите ключ в OPENAI_API_KEY):
-#        OpenAI:            https://api.openai.com/v1        (модель gpt-4o-mini)
-#        OpenRouter:        https://openrouter.ai/api/v1     (модель openai/gpt-4o-mini,
-#                                                            или бесплатные deepseek-chat и т.п.)
-#        Groq:              https://api.groq.com/openai/v1   (модель llama-3.1-8b-instant)
+# Облачный «оратор» — OpenAI-совместимый /chat/completions. По умолчанию
+# — Groq (ffast, TTFB < 1 с, бесплатный тариф с ключом). Ключ Groq задаётся
+# переменной OPENAI_API_KEY или строкой OPENAI_API_KEY=... в
+# ~/.config/jarvis-assistant/config (приоритет: env > файл > default тут).
+def _load_openai_key():
+    env = os.environ.get('OPENAI_API_KEY')
+    if env:
+        return env.strip()
+    cfg_path = os.path.expanduser('~/.config/jarvis-assistant/config')
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith('OPENAI_API_KEY='):
+                        v = line.split('=', 1)[1].strip().strip('"\'')
+                        if v:
+                            return v
+        except OSError:
+            pass
+    return ''
+
+
+OPENAI_API_KEY = _load_openai_key()
+#    Провайдеры (замените две строки ниже):
+#        opencode.ai/zen (по умолчанию): https://opencode.ai/zen/v1  (deepseek-v4-flash-free, без ключа)
+#        Groq (через VPN):                https://api.groq.com/openai/v1  (llama-3.1-8b-instant)
+#        OpenAI:                          https://api.openai.com/v1      (gpt-4o-mini)
+#        OpenRouter (через VPN):          https://openrouter.ai/api/v1   (openai/gpt-4o-mini)
 OPENAI_BASE_URL = 'https://opencode.ai/zen/v1'
 OPENAI_MODEL = 'deepseek-v4-flash-free'
 
@@ -251,12 +271,10 @@ OLLAMA_CHAT_URL = 'http://localhost:11434/api/chat'       # основной —
 OLLAMA_MODEL = 'qwen2.5:3b-instruct'   # см. README про выбор модели (важно: модель должна поддерживать tools)
 
 # Облачная vision-модель для описания экрана (Ева, что на экране?).
-# Модель должна принимать картинки; у бесплатного opencode.ai/zen текстовые
-# модели, поэтому ради «зрения» укажите ключ и vision-модель, например:
-#   OpenAI:   OPENAI_API_KEY=...  VISION_OPENAI_MODEL='gpt-4o-mini'
-#   OpenRouter: OPENAI_BASE_URL='https://openrouter.ai/api/v1'
-#              VISION_OPENAI_MODEL='openai/gpt-4o-mini'
-VISION_OPENAI_MODEL = 'gpt-4o-mini'
+# Groq vision: llama-3.2-11b-vision-preview. Для других провайдеров:
+#   OpenAI:      VISION_OPENAI_MODEL='gpt-4o-mini'
+#   OpenRouter:  VISION_OPENAI_MODEL='openai/gpt-4o-mini'
+VISION_OPENAI_MODEL = 'llama-3.2-11b-vision-preview'
 
 # Устойчивость к перегрузке облака. Бесплатные эндпоинты (opencode.ai/zen)
 # отвечают 429 Too Many Requests по несколько секунд в минуту. Чтобы не
@@ -394,6 +412,46 @@ DIALOGUE_ECHO_GUARD_SECONDS = 1.0
 # Минимальная длительность «живой» речи (без тишины), чтобы счесть её
 # репликой: щелчки, кашель и короткие шумы не запускают команду.
 DIALOGUE_MIN_SPEECH_SECONDS = 0.6
+
+# ============================== СКОРОСТЬ ОТВЕТА ============================
+#
+# «Разговорные» запросы (привет, вопрос про книгу и т.п.) системных
+# действий не требуют — локальная модель для них НЕ вызывается, ответ
+# сразу формирует облако. Это экономит ~1.5-3 с на слабом CPU, где
+# qwen2.5:3b думает над каждым вопросом, даже когда выполнять нечего.
+# Слова-маркеры ниже соответствуют описаниям инструментов: если фраза
+# не содержит ни одного — действий не будет. Если какая-то голосовая
+# команда перестала выполняться — добавьте её слова в этот список.
+SYSTEM_ACTION_TRIGGERS = (
+    # приложения, ссылки, контент
+    'открой', 'открыть', 'откройте', 'запусти', 'запустите', 'запустить',
+    'покажи', 'покажите', 'найди', 'найти', 'поищи', 'браузер', 'сайт',
+    'ссылку', 'ссылка', 'видео', 'картинк', 'изображени', 'фото', 'музык',
+    'песню', 'трек', 'почту', 'почта', 'календар', 'заметк', 'приложени',
+    'программ', 'файл', 'терминал', 'редактор',
+    # громкость / звук
+    'громкост', 'громче', 'тише', 'потише', 'погромче', 'звук',
+    'заглуши', 'мute', 'без звука', 'выключи звук', 'включи звук',
+    # яркость / экран / тема
+    'яркост', 'светлее', 'темнее', 'тёмную тему', 'темную тему',
+    'тёмный режим', 'темный режим', 'светлую тему', 'ночной режим',
+    'ночник', 'тёплые тона', 'экран',
+    # wi-fi / блокировка / сон
+    'вайфай', 'wi-fi', 'wifi', 'сеть', 'интернет',
+    'заблокир', 'блокировк', 'спящий', 'усыпи', 'уснуть', 'усни', 'сон',
+    # время / таймер
+    'который час', 'сколько времени', 'время', 'дата', 'число',
+    'таймер', 'будильник', 'напомни', 'напоминание', 'через ',
+    # погода / курсы / новости
+    'погод', 'температур', 'дождь', 'снег', 'облачн', 'солнечн',
+    'курс', 'курсы', 'доллар', 'евро', 'юань', 'валют',
+    'новост', 'что нового', 'лента',
+    # скриншот / экран / работа
+    'скриншот', 'скрин', 'снимок экрана',
+    'доброе утро', 'начни день', 'старт дня', 'начни работу',
+    'рабочие приложения', 'учиться', 'исследован', 'позаниматься',
+    'утреннюю сводку', 'сводку', 'план на день',
+)
 
 # Максимум ожидания ответа LLM (сек). Облако иногда отвечает медленно,
 # но бесконечно ждать нельзя — надёжнее вернуться в ожидание.
